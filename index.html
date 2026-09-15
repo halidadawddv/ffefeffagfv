@@ -1,0 +1,1780 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>STEEL STORM — Web Edition</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; overflow: hidden;
+    background: #0a0c12; height: 100%;
+    font-family: 'Consolas', monospace;
+    touch-action: none; user-select: none;
+  }
+  #game { display: block; margin: 0 auto; background: #0a0c12; }
+  #wrap {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+"use strict";
+
+// ============================================================
+//  КОНСТАНТЫ
+// ============================================================
+const WIDTH = 1024, HEIGHT = 576;
+const WORLD_W = 1800, WORLD_H = 1100;
+const TAU = Math.PI * 2;
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+canvas.width = WIDTH; canvas.height = HEIGHT;
+
+// Автомасштаб под окно
+function fitCanvas() {
+  const scale = Math.min(window.innerWidth / WIDTH, window.innerHeight / HEIGHT);
+  canvas.style.width  = (WIDTH  * scale) + 'px';
+  canvas.style.height = (HEIGHT * scale) + 'px';
+}
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
+
+// ============================================================
+//  ХЕЛПЕРЫ
+// ============================================================
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const darken = (c, f = 0.6) => [c[0]*f|0, c[1]*f|0, c[2]*f|0];
+const lighten = (c, f = 1.45) => [
+  Math.min(255, c[0]*f|0), Math.min(255, c[1]*f|0), Math.min(255, c[2]*f|0)
+];
+const angDiff = (a, b) => ((b - a + 180) % 360 + 360) % 360 - 180;
+const rgb = (c, a) => a === undefined
+  ? `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`
+  : `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+
+function vLen(x, y) { return Math.hypot(x, y); }
+function vNorm(x, y) {
+  const l = Math.hypot(x, y);
+  return l > 0.0001 ? { x: x / l, y: y / l } : { x: 0, y: 0 };
+}
+
+function roundRect(g, x, y, w, h, r) {
+  if (r <= 0) { g.rect(x, y, w, h); return; }
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+
+function drawRect(g, color, x, y, w, h, radius = 0, strokeWidth = 0) {
+  g.beginPath();
+  roundRect(g, x, y, w, h, radius);
+  if (strokeWidth > 0) { g.strokeStyle = rgb(color); g.lineWidth = strokeWidth; g.stroke(); }
+  else { g.fillStyle = rgb(color); g.fill(); }
+}
+
+// Свечение — просто radial gradient
+function drawGlow(g, x, y, radius, color, alpha = 0.6) {
+  const grad = g.createRadialGradient(x, y, 0, x, y, radius);
+  grad.addColorStop(0, rgb(color, alpha));
+  grad.addColorStop(1, rgb(color, 0));
+  g.fillStyle = grad;
+  g.beginPath();
+  g.arc(x, y, radius, 0, TAU);
+  g.fill();
+}
+
+// Текст с обводкой/свечением
+function drawText(g, text, font, color, x, y, center = false, glow = null, gsize = 2) {
+  g.font = font;
+  g.textAlign = center ? 'center' : 'left';
+  g.textBaseline = center ? 'middle' : 'top';
+  if (glow) {
+    g.shadowColor = rgb(glow);
+    g.shadowBlur = gsize * 3;
+  }
+  g.fillStyle = rgb(color);
+  g.fillText(text, x, y);
+  g.shadowBlur = 0;
+}
+
+// ============================================================
+//  ЧАСТИЦЫ
+// ============================================================
+class Particle {
+  constructor(px, py, vx, vy, life, size, color, drag = 0.93, grav = 0, kind = 'circle') {
+    this.px = px; this.py = py;
+    this.vx = vx; this.vy = vy;
+    this.life = life; this.maxLife = life;
+    this.size = size; this.color = color;
+    this.drag = drag; this.grav = grav; this.kind = kind;
+  }
+  update(dt) {
+    this.life -= dt;
+    const k = Math.pow(this.drag, dt * 60);
+    this.vx *= k; this.vy *= k;
+    this.vy += this.grav * dt;
+    this.px += this.vx * dt;
+    this.py += this.vy * dt;
+    return this.life > 0;
+  }
+}
+
+class Shockwave {
+  constructor(x, y, maxR, color = [255, 200, 120], width = 7, speed = 720) {
+    this.x = x; this.y = y;
+    this.r = 0; this.maxR = maxR;
+    this.color = color; this.width = width; this.speed = speed;
+  }
+  update(dt) { this.r += this.speed * dt; return this.r < this.maxR; }
+  draw(g, cam) {
+    const p = cam.toScreen(this.x, this.y);
+    const t = 1 - this.r / this.maxR;
+    const a = 210 * t * t / 255;
+    const w = Math.max(1, this.width * t);
+    if (this.r < 1) return;
+    g.strokeStyle = rgb(this.color, a);
+    g.lineWidth = w;
+    g.beginPath();
+    g.arc(p.x, p.y, this.r, 0, TAU);
+    g.stroke();
+  }
+}
+
+// ============================================================
+//  КАМЕРА
+// ============================================================
+class Camera {
+  constructor() {
+    this.x = WORLD_W / 2; this.y = WORLD_H / 2;
+    this.shakeAmt = 0;
+    this.ox = 0; this.oy = 0;
+  }
+  update(tx, ty, dt) {
+    this.x += (tx - this.x) * Math.min(1, dt * 7);
+    this.y += (ty - this.y) * Math.min(1, dt * 7);
+    const m = 24;
+    this.x = clamp(this.x, WIDTH/2 + m, WORLD_W - WIDTH/2 - m);
+    this.y = clamp(this.y, HEIGHT/2 + m, WORLD_H - HEIGHT/2 - m);
+    if (this.shakeAmt > 0.2) {
+      this.ox = (Math.random() * 2 - 1) * this.shakeAmt;
+      this.oy = (Math.random() * 2 - 1) * this.shakeAmt;
+      this.shakeAmt *= 0.88;
+    } else { this.shakeAmt = 0; this.ox = 0; this.oy = 0; }
+  }
+  shake(amt) { this.shakeAmt = Math.min(35, this.shakeAmt + amt); }
+  toScreen(wx, wy) {
+    return { x: wx - this.x + WIDTH/2 + this.ox, y: wy - this.y + HEIGHT/2 + this.oy };
+  }
+  toWorld(sx, sy) {
+    return { x: sx + this.x - WIDTH/2 - this.ox, y: sy + this.y - HEIGHT/2 - this.oy };
+  }
+}
+
+// ============================================================
+//  ФОН
+// ============================================================
+function makeBackground() {
+  const bg = document.createElement('canvas');
+  bg.width = WORLD_W; bg.height = WORLD_H;
+  const g = bg.getContext('2d');
+  // вертикальный градиент
+  const grad = g.createLinearGradient(0, 0, 0, WORLD_H);
+  grad.addColorStop(0, 'rgb(16,18,26)');
+  grad.addColorStop(1, 'rgb(24,28,38)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, WORLD_W, WORLD_H);
+  // пятна
+  for (let i = 0; i < 300; i++) {
+    const x = Math.random() * WORLD_W, y = Math.random() * WORLD_H;
+    const r = 30 + Math.random() * 110;
+    const cols = [[34,38,50],[28,32,42],[40,44,58],[22,26,34]];
+    const c = cols[Math.random() * cols.length | 0];
+    g.fillStyle = rgb(c, 0.18);
+    g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+  }
+  // сетка
+  g.strokeStyle = 'rgba(120,170,255,0.04)';
+  g.lineWidth = 1;
+  for (let x = 0; x < WORLD_W; x += 80) {
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, WORLD_H); g.stroke();
+  }
+  for (let y = 0; y < WORLD_H; y += 80) {
+    g.beginPath(); g.moveTo(0, y); g.lineTo(WORLD_W, y); g.stroke();
+  }
+  return bg;
+}
+
+// ============================================================
+//  СТЕНЫ
+// ============================================================
+class Wall {
+  constructor(x, y, w, h, destructible = false, hp = 60, explosive = false, variant = 'metal') {
+    this.x = x; this.y = y; this.w = w; this.h = h;
+    this.destructible = destructible;
+    this.maxHp = hp; this.hp = hp;
+    this.explosive = explosive;
+    this.variant = variant;
+    this.flash = 0;
+    this.seed = Math.random() * 99999 | 0;
+  }
+  hit(dmg) {
+    if (!this.destructible) { this.flash = 0.4; return false; }
+    this.hp -= dmg;
+    this.flash = 0.5;
+    return this.hp <= 0;
+  }
+}
+
+function makeWalls() {
+  const walls = [];
+  const t = 40;
+  walls.push(new Wall(0, 0, WORLD_W, t, false, 0, false, 'metal'));
+  walls.push(new Wall(0, WORLD_H - t, WORLD_W, t, false, 0, false, 'metal'));
+  walls.push(new Wall(0, 0, t, WORLD_H, false, 0, false, 'metal'));
+  walls.push(new Wall(WORLD_W - t, 0, t, WORLD_H, false, 0, false, 'metal'));
+
+  const placed = [];
+  const spawnZone = { x: WORLD_W/2 - 220, y: WORLD_H/2 - 220, w: 440, h: 440 };
+
+  function overlaps(a, b) {
+    return !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y);
+  }
+
+  function tryPlace(w, h, kind, hp, expl = false) {
+    for (let i = 0; i < 80; i++) {
+      const x = 80 + Math.random() * (WORLD_W - 160 - w);
+      const y = 80 + Math.random() * (WORLD_H - 160 - h);
+      const r = { x, y, w, h };
+      if (overlaps(r, spawnZone)) continue;
+      let bad = false;
+      for (const p of placed) {
+        if (overlaps({ x: r.x - 35, y: r.y - 35, w: r.w + 70, h: r.h + 70 }, p)) { bad = true; break; }
+      }
+      if (bad) continue;
+      placed.push(r);
+      walls.push(new Wall(r.x, r.y, r.w, r.h, kind !== 'pillar', hp, expl, kind));
+      return true;
+    }
+    return false;
+  }
+
+  for (let i = 0; i < 10; i++)
+    tryPlace(80 + Math.random()*100, 80 + Math.random()*100, Math.random() < 0.5 ? 'metal' : 'wood', 65);
+  for (let i = 0; i < 14; i++)
+    tryPlace(45 + Math.random()*35, 45 + Math.random()*35, 'crate', 32);
+  for (let i = 0; i < 8; i++)
+    tryPlace(36, 36, 'barrel', 20, true);
+  for (let i = 0; i < 5; i++)
+    tryPlace(50 + Math.random()*20, 50 + Math.random()*20, 'pillar', 9999);
+
+  return walls;
+}
+
+function wallBaseColor(w) {
+  switch (w.variant) {
+    case 'wood':   return [128, 82, 46];
+    case 'crate':  return [150, 100, 55];
+    case 'barrel': return [180, 60, 50];
+    case 'pillar': return [74, 80, 92];
+    default:       return [86, 92, 108];
+  }
+}
+
+function drawWall(g, w, cam) {
+  const sp = cam.toScreen(w.x, w.y);
+  if (sp.x > WIDTH + 100 || sp.y > HEIGHT + 100 || sp.x + w.w < -100 || sp.y + w.h < -100) return;
+
+  let base;
+  if (w.destructible) {
+    const ratio = clamp(w.hp / w.maxHp, 0, 1);
+    const b = wallBaseColor(w);
+    base = [b[0]*ratio + 40*(1-ratio), b[1]*ratio + 28*(1-ratio), b[2]*ratio + 18*(1-ratio)];
+  } else base = wallBaseColor(w);
+
+  drawRect(g, base, sp.x, sp.y, w.w, w.h, 3);
+
+  if (w.variant === 'crate') {
+    drawRect(g, lighten(base, 1.35), sp.x, sp.y, w.w, w.h, 3, 2);
+    g.strokeStyle = rgb(darken(base, 0.65)); g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(sp.x+5, sp.y+5); g.lineTo(sp.x+w.w-5, sp.y+w.h-5);
+    g.moveTo(sp.x+w.w-5, sp.y+5); g.lineTo(sp.x+5, sp.y+w.h-5);
+    g.stroke();
+  } else if (w.variant === 'barrel') {
+    drawRect(g, lighten(base, 1.4), sp.x, sp.y, w.w, 3);
+    drawRect(g, darken(base, 0.5), sp.x, sp.y + w.h - 3, w.w, 3);
+    const cx = sp.x + w.w/2, cy = sp.y + w.h/2;
+    g.strokeStyle = 'rgb(255,230,120)'; g.lineWidth = 2;
+    g.beginPath(); g.arc(cx, cy, 6, 0, TAU); g.stroke();
+    g.beginPath();
+    g.moveTo(cx-4, cy); g.lineTo(cx+4, cy);
+    g.moveTo(cx, cy-4); g.lineTo(cx, cy+4);
+    g.stroke();
+  } else if (w.variant === 'pillar') {
+    drawRect(g, lighten(base, 1.5), sp.x, sp.y, 3, w.h);
+    drawRect(g, lighten(base, 1.3), sp.x, sp.y, w.w, 3);
+    drawRect(g, darken(base, 0.55), sp.x, sp.y + w.h - 3, w.w, 3);
+  } else if (w.variant === 'wood') {
+    g.strokeStyle = rgb(darken(base, 0.6)); g.lineWidth = 2;
+    for (let yy = sp.y + 20; yy < sp.y + w.h; yy += 20) {
+      g.beginPath(); g.moveTo(sp.x+3, yy); g.lineTo(sp.x+w.w-3, yy); g.stroke();
+    }
+  } else {
+    drawRect(g, lighten(base, 1.5), sp.x, sp.y, w.w, 3);
+    drawRect(g, lighten(base, 1.3), sp.x, sp.y, 3, w.h);
+    drawRect(g, darken(base, 0.55), sp.x, sp.y + w.h - 3, w.w, 3);
+    drawRect(g, darken(base, 0.55), sp.x + w.w - 3, sp.y, 3, w.h);
+  }
+
+  // Трещины — детерминированные через псевдослучайный генератор
+  if (w.destructible) {
+    const ratio = clamp(w.hp / w.maxHp, 0, 1);
+    if (ratio < 0.9) {
+      // простой seed-based PRNG
+      let seed = w.seed;
+      const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+      const n = ((1 - ratio) * 10 | 0) + 2;
+      g.strokeStyle = 'rgb(20,14,10)'; g.lineWidth = 2;
+      for (let i = 0; i < n; i++) {
+        const x1 = sp.x + 2 + rnd() * (w.w - 4);
+        const y1 = sp.y + 2 + rnd() * (w.h - 4);
+        const x2 = x1 + (rnd() * 40 - 20);
+        const y2 = y1 + (rnd() * 40 - 20);
+        g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
+      }
+    }
+  }
+
+  if (w.flash > 0) {
+    g.fillStyle = `rgba(255,255,255,${140 * w.flash / 255})`;
+    g.fillRect(sp.x, sp.y, w.w, w.h);
+  }
+}
+
+// ============================================================
+//  ОБЛОМКИ
+// ============================================================
+class Rubble {
+  constructor(x, y, size, color, vx, vy, ang, spin, life = 10.0) {
+    this.x = x; this.y = y;
+    this.vx = vx; this.vy = vy;
+    this.size = size; this.color = color;
+    this.ang = ang; this.spin = spin;
+    this.rest = false;
+    this.life = life; this.maxLife = life;
+    const n = 4 + (Math.random() * 2 | 0);
+    this.shape = [];
+    for (let i = 0; i < n; i++) this.shape.push([Math.random()*2 - 1, Math.random()*2 - 1]);
+  }
+  update(dt) {
+    this.life -= dt;
+    if (!this.rest) {
+      const k = Math.pow(0.93, dt * 60);
+      this.vx *= k; this.vy *= k;
+      this.x += this.vx * dt; this.y += this.vy * dt;
+      this.ang += this.spin * dt;
+      if (this.vx*this.vx + this.vy*this.vy < 200) {
+        this.spin *= 0.88; this.vx *= 0.85; this.vy *= 0.85;
+        if (Math.abs(this.spin) < 8 && this.vx*this.vx + this.vy*this.vy < 30) {
+          this.rest = true; this.spin = 0; this.vx = 0; this.vy = 0;
+        }
+      }
+    }
+    return this.life > 0;
+  }
+  draw(g, cam) {
+    const p = cam.toScreen(this.x, this.y);
+    const a = clamp(this.life / this.maxLife * 1.6, 0, 1);
+    if (a < 0.05) return;
+    const ca = Math.cos(this.ang * Math.PI / 180);
+    const sa = Math.sin(this.ang * Math.PI / 180);
+    const s = this.size;
+    const col = darken(this.color, 0.45 + 0.55 * a);
+    g.fillStyle = rgb(col);
+    g.beginPath();
+    for (let i = 0; i < this.shape.length; i++) {
+      const [sx, sy] = this.shape[i];
+      const px = p.x + (sx * s) * ca - (sy * s) * sa;
+      const py = p.y + (sx * s) * sa + (sy * s) * ca;
+      if (i === 0) g.moveTo(px, py); else g.lineTo(px, py);
+    }
+    g.closePath(); g.fill();
+    g.strokeStyle = rgb(darken(col, 0.55)); g.lineWidth = 2; g.stroke();
+  }
+}
+
+// ============================================================
+//  ПУЛИ
+// ============================================================
+class Bullet {
+  constructor(x, y, angle, speed, damage, owner, color = [255,220,130], size = 4, life = 2.2, splash = 0) {
+    this.x = x; this.y = y;
+    this.vx = Math.cos(angle) * speed;
+    this.vy = Math.sin(angle) * speed;
+    this.damage = damage; this.owner = owner;
+    this.color = color; this.size = size;
+    this.life = life; this.splash = splash;
+    this.dead = false;
+  }
+  update(dt, game) {
+    this.life -= dt;
+    if (this.life <= 0) { this.dead = true; return; }
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    if (Math.random() < 0.6) {
+      game.particles.push(new Particle(
+        this.x, this.y,
+        Math.random()*30 - 15, Math.random()*30 - 15,
+        0.12 + Math.random() * 0.16, this.size * 0.8, this.color, 0.9
+      ));
+    }
+    if (this.x < -60 || this.x > WORLD_W + 60 || this.y < -60 || this.y > WORLD_H + 60) {
+      this.dead = true; return;
+    }
+    // стены
+    for (const w of game.walls) {
+      if (this.x >= w.x && this.x <= w.x + w.w && this.y >= w.y && this.y <= w.y + w.h) {
+        this.dead = true;
+        const d = vNorm(this.vx, this.vy);
+        game.hitWall(w, this.x, this.y, this.damage, d);
+        return;
+      }
+    }
+    // цели
+    const targets = this.owner === game.player ? game.enemies : [game.player];
+    for (const t of targets) {
+      if (!t.alive || t === this.owner) continue;
+      const dx = this.x - t.pos.x, dy = this.y - t.pos.y;
+      if (dx*dx + dy*dy < (t.radius + this.size) ** 2) {
+        this.dead = true;
+        const d = vNorm(this.vx, this.vy);
+        t.takeDamage(this.damage, game, d);
+        if (this.splash > 0) game.explode(this.x, this.y, this.splash, this.color);
+        return;
+      }
+    }
+  }
+  draw(g, cam) {
+    const p = cam.toScreen(this.x, this.y);
+    drawGlow(g, p.x, p.y, 14, this.color, 0.85);
+    g.fillStyle = 'rgb(255,255,235)';
+    g.beginPath(); g.arc(p.x, p.y, this.size, 0, TAU); g.fill();
+  }
+}
+
+// ============================================================
+//  БОНУСЫ
+// ============================================================
+const POWER_TYPES = {
+  health: { color: [235, 70, 90],  letter: 'H' },
+  shield: { color: [90, 170, 255], letter: 'S' },
+  rapid:  { color: [255, 210, 70], letter: 'R' },
+  triple: { color: [190, 110, 255],letter: 'T' },
+  speed:  { color: [110, 240, 160],letter: 'V' },
+};
+
+class Powerup {
+  constructor(x, y, kind) {
+    this.x = x; this.y = y; this.kind = kind;
+    this.life = 22.0; this.t = 0;
+  }
+  update(dt) { this.life -= dt; this.t += dt; return this.life > 0; }
+  draw(g, cam) {
+    const p = cam.toScreen(this.x, this.y);
+    const col = POWER_TYPES[this.kind].color;
+    const pulse = 1 + Math.sin(this.t * 5) * 0.12;
+    const bob = Math.sin(this.t * 3) * 4;
+    const R = 16 * pulse;
+    drawGlow(g, p.x, p.y + bob, 26, col, 0.7);
+    // ромб
+    g.fillStyle = rgb(darken(col, 0.5));
+    g.beginPath();
+    for (let i = 0; i < 4; i++) {
+      const a = (this.t * 90 + i * 90) * Math.PI / 180;
+      const px = p.x + Math.cos(a) * R;
+      const py = p.y + bob + Math.sin(a) * R;
+      if (i === 0) g.moveTo(px, py); else g.lineTo(px, py);
+    }
+    g.closePath(); g.fill();
+    g.strokeStyle = rgb(col); g.lineWidth = 3; g.stroke();
+    drawText(g, POWER_TYPES[this.kind].letter, 'bold 18px Consolas', [255,255,255], p.x, p.y + bob, true);
+  }
+}
+
+// ============================================================
+//  ТАНКИ
+// ============================================================
+class Tank {
+  constructor(x, y, hull, accent) {
+    this.pos = { x, y };
+    this.angle = 0;
+    this.turret = 0;
+    this.vel = { x: 0, y: 0 };
+    this.hullColor = hull;
+    this.accent = accent;
+    this.radius = 18;
+    this.maxHp = 100; this.hp = 100;
+    this.alive = true;
+    this.speed = 195;
+    this.turnSpeed = 230;
+    this.treadPhase = 0;
+    this.recoil = 0;
+    this.hitFlash = 0;
+    this.fireCd = 0;
+    this.fireRate = 0.5;
+    this.damage = 20;
+    this.bulletSpeed = 800;
+    this.bulletColor = [255, 225, 140];
+    this.shield = 0;
+    this.barrelLen = 30;
+    this.scoreValue = 0;
+  }
+
+  takeDamage(dmg, game, direction) {
+    if (!this.alive) return;
+    if (this.shield > 0) {
+      this.shield = Math.max(0, this.shield - 1.2);
+      game.explode(this.pos.x, this.pos.y, 0.35, [120,200,255], false);
+      return;
+    }
+    this.hp -= dmg;
+    this.hitFlash = 1.0;
+    game.camera.shake(this === game.player ? 3 : 1.5);
+    for (let i = 0; i < 5; i++) {
+      const a = Math.random() * TAU;
+      const sp = 60 + Math.random() * 160;
+      game.particles.push(new Particle(
+        this.pos.x, this.pos.y,
+        Math.cos(a) * sp, Math.sin(a) * sp,
+        0.18 + Math.random() * 0.27,
+        2 + Math.random() * 2,
+        [255, 170, 90], 0.9
+      ));
+    }
+    if (this.hp <= 0) {
+      this.hp = 0; this.alive = false;
+      game.explode(this.pos.x, this.pos.y, this === game.player ? 2.4 : 1.6, [255,160,60]);
+      if (this === game.player) {
+        game.camera.shake(25); game.state = 'gameover';
+      } else {
+        game.score += this.scoreValue;
+        game.kills++;
+        game.combo++; game.comboTimer = 2.5;
+        if (Math.random() < 0.24) {
+          const kinds = Object.keys(POWER_TYPES);
+          const weights = [30, 18, 20, 14, 18];
+          let r = Math.random() * 100, acc = 0, pick = kinds[0];
+          for (let i = 0; i < kinds.length; i++) {
+            acc += weights[i]; if (r < acc) { pick = kinds[i]; break; }
+          }
+          game.powerups.push(new Powerup(this.pos.x, this.pos.y, pick));
+        }
+      }
+    }
+  }
+
+  move(dt, forward, turn, game) {
+    this.angle += turn * this.turnSpeed * dt;
+    this.angle = ((this.angle % 360) + 360) % 360;
+    const rad = this.angle * Math.PI / 180;
+    const tx = Math.cos(rad) * forward * this.speed;
+    const ty = Math.sin(rad) * forward * this.speed;
+    const k = Math.min(1, dt * 9);
+    this.vel.x += (tx - this.vel.x) * k;
+    this.vel.y += (ty - this.vel.y) * k;
+    this.pos.x += this.vel.x * dt;
+    this.pos.y += this.vel.y * dt;
+    this.treadPhase += Math.hypot(this.vel.x, this.vel.y) * dt * 0.25;
+  }
+
+  collide(game) {
+    for (const w of game.walls) {
+      const cx = clamp(this.pos.x, w.x, w.x + w.w);
+      const cy = clamp(this.pos.y, w.y, w.y + w.h);
+      const dx = this.pos.x - cx, dy = this.pos.y - cy;
+      const d2 = dx*dx + dy*dy;
+      if (d2 < this.radius * this.radius) {
+        if (d2 < 0.0001) {
+          const left = this.pos.x - w.x;
+          const right = w.x + w.w - this.pos.x;
+          const top = this.pos.y - w.y;
+          const bot = w.y + w.h - this.pos.y;
+          const m = Math.min(left, right, top, bot);
+          if (m === left) this.pos.x = w.x - this.radius;
+          else if (m === right) this.pos.x = w.x + w.w + this.radius;
+          else if (m === top) this.pos.y = w.y - this.radius;
+          else this.pos.y = w.y + w.h + this.radius;
+        } else {
+          const d = Math.sqrt(d2);
+          const nx = dx / d, ny = dy / d;
+          const push = this.radius - d;
+          this.pos.x += nx * push;
+          this.pos.y += ny * push;
+        }
+      }
+    }
+    this.pos.x = clamp(this.pos.x, this.radius, WORLD_W - this.radius);
+    this.pos.y = clamp(this.pos.y, this.radius, WORLD_H - this.radius);
+  }
+
+  fire(game, count = 1, spread = 9.0, speedMul = 1.0) {
+    if (this.fireCd > 0) return false;
+    this.fireCd = this.fireRate;
+    this.recoil = 1.0;
+    for (let i = 0; i < count; i++) {
+      const off = (i - (count - 1) / 2) * spread;
+      const ang = (this.turret + off) * Math.PI / 180;
+      const dx = Math.cos(ang), dy = Math.sin(ang);
+      const mx = this.pos.x + dx * (this.radius + this.barrelLen);
+      const my = this.pos.y + dy * (this.radius + this.barrelLen);
+      game.bullets.push(new Bullet(
+        mx, my, ang, this.bulletSpeed * speedMul,
+        this.damage, this, this.bulletColor,
+        this === game.player ? 5 : 4
+      ));
+      for (let j = 0; j < 4; j++) {
+        const sp = 120 + Math.random() * 260;
+        game.particles.push(new Particle(
+          mx, my,
+          dx * sp + (Math.random()*100 - 50),
+          dy * sp + (Math.random()*100 - 50),
+          0.08 + Math.random() * 0.12,
+          2 + Math.random() * 2,
+          [255, 230, 160], 0.85
+        ));
+      }
+    }
+    game.flashes.push({ x: this.pos.x, y: this.pos.y, t: 0.09 });
+    return true;
+  }
+
+  updateTimers(dt) {
+    this.fireCd = Math.max(0, this.fireCd - dt);
+    this.recoil = Math.max(0, this.recoil - dt * 6);
+    this.hitFlash = Math.max(0, this.hitFlash - dt * 3.5);
+    if (this.shield > 0) this.shield = Math.max(0, this.shield - dt);
+  }
+
+  draw(g, cam, game) {
+    const p = cam.toScreen(this.pos.x, this.pos.y);
+    const a = this.angle * Math.PI / 180;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const R = (x, y) => ({ x: p.x + x*ca - y*sa, y: p.y + x*sa + y*ca });
+
+    // тень
+    g.fillStyle = 'rgba(0,0,0,0.35)';
+    g.beginPath();
+    g.ellipse(p.x + 4, p.y + 6, 26, 20, 0, 0, TAU);
+    g.fill();
+
+    // гусеницы
+    for (const side of [-1, 1]) {
+      const pts = [
+        R(-24, side*13 - 6), R(24, side*13 - 6),
+        R(24, side*13 + 6), R(-24, side*13 + 6)
+      ];
+      g.fillStyle = 'rgb(30,33,40)';
+      g.beginPath();
+      g.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < 4; i++) g.lineTo(pts[i].x, pts[i].y);
+      g.closePath(); g.fill();
+      g.strokeStyle = 'rgb(52,56,66)'; g.lineWidth = 2; g.stroke();
+      // траки
+      for (let i = 0; i < 7; i++) {
+        const x = -24 + ((i * 7 + this.treadPhase) % 48);
+        const tp = [R(x, side*13-6), R(x+3, side*13-6), R(x+3, side*13+6), R(x, side*13+6)];
+        g.fillStyle = 'rgb(72,77,90)';
+        g.beginPath();
+        g.moveTo(tp[0].x, tp[0].y);
+        for (let k = 1; k < 4; k++) g.lineTo(tp[k].x, tp[k].y);
+        g.closePath(); g.fill();
+      }
+    }
+
+    // корпус
+    const hull = [
+      R(-22,-13), R(11,-13), R(22,-7), R(22,7), R(11,13), R(-22,13), R(-25,7), R(-25,-7)
+    ];
+    g.fillStyle = rgb(darken(this.hullColor, 0.55));
+    g.beginPath();
+    g.moveTo(hull[0].x, hull[0].y);
+    for (let i = 1; i < hull.length; i++) g.lineTo(hull[i].x, hull[i].y);
+    g.closePath(); g.fill();
+
+    const inner = [
+      R(-19,-10), R(9,-10), R(19,-5), R(19,5), R(9,10), R(-19,10), R(-22,5), R(-22,-5)
+    ];
+    g.fillStyle = rgb(this.hullColor);
+    g.beginPath();
+    g.moveTo(inner[0].x, inner[0].y);
+    for (let i = 1; i < inner.length; i++) g.lineTo(inner[i].x, inner[i].y);
+    g.closePath(); g.fill();
+
+    // блик
+    const hi = [R(-17,-8), R(7,-8), R(15,-3), R(7,-3), R(-17,-3)];
+    g.fillStyle = rgb(lighten(this.hullColor, 1.35));
+    g.beginPath();
+    g.moveTo(hi[0].x, hi[0].y);
+    for (let i = 1; i < hi.length; i++) g.lineTo(hi[i].x, hi[i].y);
+    g.closePath(); g.fill();
+
+    // контур корпуса
+    g.strokeStyle = rgb(this.accent); g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(hull[0].x, hull[0].y);
+    for (let i = 1; i < hull.length; i++) g.lineTo(hull[i].x, hull[i].y);
+    g.closePath(); g.stroke();
+
+    // башня
+    const ta = this.turret * Math.PI / 180;
+    const cta = Math.cos(ta), sta = Math.sin(ta);
+    const RT = (x, y) => ({ x: p.x + x*cta - y*sta, y: p.y + x*sta + y*cta });
+    const rec = this.recoil * 8;
+    const barrel = [
+      RT(6 - rec, -5), RT(this.barrelLen - rec, -4),
+      RT(this.barrelLen - rec, 4), RT(6 - rec, 5)
+    ];
+    g.fillStyle = 'rgb(44,48,58)';
+    g.beginPath();
+    g.moveTo(barrel[0].x, barrel[0].y);
+    for (let i = 1; i < 4; i++) g.lineTo(barrel[i].x, barrel[i].y);
+    g.closePath(); g.fill();
+
+    g.fillStyle = 'rgb(92,98,112)';
+    const half = [RT(6-rec,-5), RT(this.barrelLen-rec,-4), RT(this.barrelLen-rec,0), RT(6-rec,0)];
+    g.beginPath();
+    g.moveTo(half[0].x, half[0].y);
+    for (let i = 1; i < 4; i++) g.lineTo(half[i].x, half[i].y);
+    g.closePath(); g.fill();
+
+    g.strokeStyle = 'rgb(20,22,28)'; g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(barrel[0].x, barrel[0].y);
+    for (let i = 1; i < 4; i++) g.lineTo(barrel[i].x, barrel[i].y);
+    g.closePath(); g.stroke();
+
+    // основание башни
+    g.fillStyle = rgb(darken(this.hullColor, 0.5));
+    g.beginPath(); g.arc(p.x, p.y, 13, 0, TAU); g.fill();
+    g.fillStyle = rgb(lighten(this.hullColor, 1.05));
+    g.beginPath(); g.arc(p.x, p.y, 11, 0, TAU); g.fill();
+    g.strokeStyle = rgb(this.accent); g.lineWidth = 2;
+    g.beginPath(); g.arc(p.x, p.y, 11, 0, TAU); g.stroke();
+    g.fillStyle = rgb(darken(this.hullColor, 0.4));
+    g.beginPath(); g.arc(p.x, p.y, 3, 0, TAU); g.fill();
+
+    // вспышка урона
+    if (this.hitFlash > 0) {
+      g.fillStyle = `rgba(255,255,255,${180 * this.hitFlash / 255})`;
+      g.beginPath(); g.arc(p.x, p.y, 22, 0, TAU); g.fill();
+    }
+
+    // щит
+    if (this.shield > 0) {
+      const Rr = 30 + Math.sin(game.time * 8) * 2;
+      g.strokeStyle = `rgba(100,190,255,${90/255})`;
+      g.lineWidth = 3;
+      g.beginPath(); g.arc(p.x, p.y, Rr, 0, TAU); g.stroke();
+    }
+  }
+}
+
+// ============================================================
+//  ИГРОК
+// ============================================================
+class Player extends Tank {
+  constructor(x, y) {
+    super(x, y, [86, 150, 235], [170, 215, 255]);
+    this.maxHp = 120; this.hp = 120;
+    this.boostCd = 0; this.boostTime = 0;
+    this.rapid = 0; this.triple = 0; this.speedBoost = 0;
+  }
+
+  update(dt, game) {
+    if (!this.alive) return;
+    let forward = 0, turn = 0;
+    if (game.keys['w'] || game.keys['arrowup'])    forward += 1.0;
+    if (game.keys['s'] || game.keys['arrowdown'])  forward -= 0.8;
+    if (game.keys['a'] || game.keys['arrowleft'])  turn -= 1.0;
+    if (game.keys['d'] || game.keys['arrowright']) turn += 1.0;
+
+    const [jf, jt] = game.joystick.get();
+    if (jf !== 0 || jt !== 0) { forward = jf; turn = jt; }
+
+    const spd = this.speed * (this.speedBoost > 0 ? 1.5 : 1.0);
+    let realSpd = spd;
+    if (this.boostTime > 0) { realSpd *= 2.0; forward = Math.max(forward, 1.0); }
+    const oldSpd = this.speed;
+    this.speed = realSpd;
+    this.move(dt, forward, turn, game);
+    this.speed = oldSpd;
+
+    // наведение башни
+    let targetAim = null;
+    if (game.mouseActive()) {
+      targetAim = game.camera.toWorld(game.mouseX, game.mouseY);
+    } else {
+      let best = 1e9;
+      for (const e of game.enemies) {
+        if (!e.alive) continue;
+        const d = Math.hypot(e.pos.x - this.pos.x, e.pos.y - this.pos.y);
+        if (d < best) { best = d; targetAim = e.pos; }
+      }
+      if (!targetAim) {
+        const rad = this.turret * Math.PI / 180;
+        targetAim = { x: this.pos.x + Math.cos(rad) * 100, y: this.pos.y + Math.sin(rad) * 100 };
+      }
+    }
+    const dx = targetAim.x - this.pos.x, dy = targetAim.y - this.pos.y;
+    if (dx*dx + dy*dy > 1) {
+      const target = Math.atan2(dy, dx) * 180 / Math.PI;
+      this.turret = ((this.turret + angDiff(this.turret, target) * Math.min(1, dt * 18)) % 360 + 360) % 360;
+    }
+
+    this.rapid = Math.max(0, this.rapid - dt);
+    this.triple = Math.max(0, this.triple - dt);
+    this.speedBoost = Math.max(0, this.speedBoost - dt);
+    this.boostTime = Math.max(0, this.boostTime - dt);
+    this.boostCd = Math.max(0, this.boostCd - dt);
+
+    // рывок
+    if ((game.keys['shift']) && this.boostCd <= 0 && forward !== 0) {
+      this.boostTime = 0.28; this.boostCd = 2.0;
+      game.camera.shake(4);
+      for (let i = 0; i < 15; i++) {
+        const a = this.angle * Math.PI / 180 + Math.PI + (Math.random() - 0.5) * 1.2;
+        const sp = 120 + Math.random() * 200;
+        game.particles.push(new Particle(
+          this.pos.x + Math.cos(a) * 20, this.pos.y + Math.sin(a) * 20,
+          Math.cos(a) * sp, Math.sin(a) * sp,
+          0.2 + Math.random() * 0.3, 3 + Math.random() * 3,
+          [150, 200, 255], 0.9
+        ));
+      }
+    }
+
+    // огонь
+    const firing = game.mouseDown || game.keys[' '] || game.fireButton.pressed;
+    if (firing && this.fireCd <= 0) {
+      const count = this.triple > 0 ? 3 : 1;
+      const rateMul = this.rapid > 0 ? 0.4 : 1.0;
+      const oldRate = this.fireRate;
+      this.fireRate = oldRate * rateMul;
+      this.fire(game, count, 8.5);
+      this.fireRate = oldRate;
+    }
+
+    this.updateTimers(dt);
+    this.collide(game);
+
+    // подбор бонусов
+    for (let i = game.powerups.length - 1; i >= 0; i--) {
+      const pu = game.powerups[i];
+      const dx = this.pos.x - pu.x, dy = this.pos.y - pu.y;
+      if (dx*dx + dy*dy < (this.radius + 22) ** 2) {
+        game.powerups.splice(i, 1);
+        if (pu.kind === 'health') this.hp = Math.min(this.maxHp, this.hp + 45);
+        else if (pu.kind === 'shield') this.shield = 9.0;
+        else if (pu.kind === 'rapid') this.rapid = 10.0;
+        else if (pu.kind === 'triple') this.triple = 10.0;
+        else if (pu.kind === 'speed') this.speedBoost = 10.0;
+        game.explode(pu.x, pu.y, 0.5, POWER_TYPES[pu.kind].color, false);
+        game.popups.push({ x: pu.x, y: pu.y, text: pu.kind.toUpperCase(), life: 1.0, color: POWER_TYPES[pu.kind].color });
+      }
+    }
+  }
+}
+
+// ============================================================
+//  ВРАГИ
+// ============================================================
+const ENEMY_TYPES = {
+  grunt:  { hp: 60,  speed: 125, turn: 160, rate: 1.1, dmg: 12, bspeed: 520, range: 520,
+            color: [70,190,110],  accent: [150,255,190], score: 100, radius: 18, pref: 260 },
+  scout:  { hp: 42,  speed: 210, turn: 260, rate: 0.55, dmg: 8,  bspeed: 620, range: 440,
+            color: [232,200,72],  accent: [255,245,170], score: 150, radius: 16, pref: 200 },
+  heavy:  { hp: 190, speed: 80,  turn: 110, rate: 1.6, dmg: 26, bspeed: 450, range: 480,
+            color: [200,82,82],   accent: [255,150,150], score: 260, radius: 24, pref: 320 },
+  sniper: { hp: 75,  speed: 100, turn: 140, rate: 1.9, dmg: 34, bspeed: 950, range: 1000,
+            color: [126,112,224], accent: [195,185,255], score: 320, radius: 18, pref: 680 },
+};
+
+function hasLoS(ax, ay, bx, by, walls) {
+  const steps = Math.floor(Math.hypot(bx - ax, by - ay) / 24) + 1;
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    const px = ax + (bx - ax) * t;
+    const py = ay + (by - ay) * t;
+    for (const w of walls) {
+      if (px >= w.x && px <= w.x + w.w && py >= w.y && py <= w.y + w.h) return false;
+    }
+  }
+  return true;
+}
+
+class Enemy extends Tank {
+  constructor(x, y, kind) {
+    const cfg = ENEMY_TYPES[kind];
+    super(x, y, cfg.color, cfg.accent);
+    this.kind = kind;
+    this.maxHp = cfg.hp; this.hp = cfg.hp;
+    this.speed = cfg.speed; this.turnSpeed = cfg.turn;
+    this.fireRate = cfg.rate; this.damage = cfg.dmg;
+    this.bulletSpeed = cfg.bspeed; this.range = cfg.range;
+    this.radius = cfg.radius; this.pref = cfg.pref;
+    this.scoreValue = cfg.score;
+    this.bulletColor = kind === 'sniper' ? [200,170,255] : [255,150,110];
+    this.strafe = Math.random() < 0.5 ? -1 : 1;
+    this.strafeTimer = 1.0 + Math.random() * 1.5;
+    this.dodgeCd = 0;
+    this.repositionTimer = 0;
+    this.lastSeenPlayer = null;
+    this.lastSeenTime = 99;
+    this.alertLevel = 0;
+  }
+
+  steerClear(angDeg, game, dist = 100) {
+    const rad = angDeg * Math.PI / 180;
+    const dx = Math.cos(rad), dy = Math.sin(rad);
+    for (const k of [0.6, 1.0]) {
+      const px = this.pos.x + dx * dist * k;
+      const py = this.pos.y + dy * dist * k;
+      for (const w of game.walls) {
+        if (px >= w.x && px <= w.x + w.w && py >= w.y && py <= w.y + w.h) return false;
+      }
+    }
+    return true;
+  }
+
+  chooseDirection(targetAng, game) {
+    if (this.steerClear(targetAng, game)) return targetAng;
+    for (const off of [25,-25,45,-45,70,-70,95,-95,130,-130,165,-165]) {
+      if (this.steerClear(targetAng + off, game)) return targetAng + off;
+    }
+    return targetAng;
+  }
+
+  dodgeCheck(game) {
+    if (this.dodgeCd > 0) return null;
+    let bestPerp = null, bestDist = 1e9;
+    for (const b of game.bullets) {
+      if (b.owner === this || b.owner !== game.player) continue;
+      const rx = this.pos.x - b.x, ry = this.pos.y - b.y;
+      const vlen = Math.hypot(b.vx, b.vy);
+      if (vlen < 1) continue;
+      const vnx = b.vx / vlen, vny = b.vy / vlen;
+      const proj = rx * vnx + ry * vny;
+      if (proj < 20 || proj > 340) continue;
+      const cx = b.x + vnx * proj, cy = b.y + vny * proj;
+      const px = this.pos.x - cx, py = this.pos.y - cy;
+      const d = Math.hypot(px, py);
+      if (d < this.radius + 26 && proj < bestDist) {
+        bestDist = proj;
+        let perpX = -vny, perpY = vnx;
+        if (perpX * rx + perpY * ry < 0) { perpX = -perpX; perpY = -perpY; }
+        bestPerp = { x: perpX, y: perpY };
+      }
+    }
+    if (bestPerp) {
+      this.dodgeCd = 0.5;
+      return Math.atan2(bestPerp.y, bestPerp.x) * 180 / Math.PI;
+    }
+    return null;
+  }
+
+  update(dt, game) {
+    if (!this.alive) return;
+    this.dodgeCd = Math.max(0, this.dodgeCd - dt);
+    const p = game.player;
+    if (!p.alive) {
+      this.move(dt, 0, 0, game);
+      this.updateTimers(dt); this.collide(game);
+      return;
+    }
+
+    const tpx = p.pos.x - this.pos.x, tpy = p.pos.y - this.pos.y;
+    const dist = Math.hypot(tpx, tpy);
+    const targetAng = Math.atan2(tpy, tpx) * 180 / Math.PI;
+    const los = hasLoS(this.pos.x, this.pos.y, p.pos.x, p.pos.y, game.walls);
+
+    if (los) {
+      this.lastSeenPlayer = { x: p.pos.x, y: p.pos.y };
+      this.lastSeenTime = 0;
+      this.alertLevel = Math.min(1, this.alertLevel + dt * 2);
+    } else {
+      this.lastSeenTime += dt;
+      this.alertLevel = Math.max(0, this.alertLevel - dt * 0.4);
+    }
+
+    let desiredAng = targetAng;
+    let forward = 0;
+
+    const dodgeAng = this.dodgeCheck(game);
+    if (dodgeAng !== null) {
+      desiredAng = dodgeAng; forward = 1;
+      this.repositionTimer = 0.45;
+    } else if (this.repositionTimer > 0) {
+      this.repositionTimer -= dt;
+      forward = 1;
+    } else if (this.kind === 'grunt') {
+      if (dist > this.pref * 1.1) forward = 1;
+      else if (dist < this.pref * 0.55) forward = -0.5;
+      else {
+        this.strafeTimer -= dt;
+        if (this.strafeTimer <= 0) { this.strafe *= -1; this.strafeTimer = 1.0 + Math.random() * 1.2; }
+        desiredAng = targetAng + this.strafe * 70; forward = 0.75;
+      }
+    } else if (this.kind === 'scout') {
+      if (dist > this.pref * 1.2) forward = 1;
+      else if (dist < this.pref * 0.55) forward = -0.7;
+      else {
+        this.strafeTimer -= dt;
+        if (this.strafeTimer <= 0) { this.strafe *= -1; this.strafeTimer = 0.6 + Math.random() * 0.8; }
+        desiredAng = targetAng + this.strafe * 100; forward = 1;
+      }
+    } else if (this.kind === 'heavy') {
+      forward = dist > this.pref * 0.7 ? 1 : 0;
+      if (los && dist < this.range * 1.2) desiredAng = targetAng;
+    } else if (this.kind === 'sniper') {
+      if (dist < this.pref * 0.55) { desiredAng = targetAng + 180; forward = 1; }
+      else if (dist > this.pref * 1.15) forward = 1;
+      else {
+        this.strafeTimer -= dt;
+        if (this.strafeTimer <= 0) { this.strafe *= -1; this.strafeTimer = 1.5 + Math.random() * 1.5; }
+        desiredAng = targetAng + this.strafe * 80; forward = 0.5;
+      }
+    }
+
+    if (!los) {
+      if (this.lastSeenPlayer && this.lastSeenTime < 4.0) {
+        const mx = this.lastSeenPlayer.x - this.pos.x, my = this.lastSeenPlayer.y - this.pos.y;
+        if (mx*mx + my*my > 1) {
+          desiredAng = Math.atan2(my, mx) * 180 / Math.PI;
+          forward = Math.max(forward, 0.85);
+        }
+      } else {
+        desiredAng = targetAng;
+        forward = Math.max(forward, 0.85);
+      }
+    }
+
+    desiredAng = this.chooseDirection(desiredAng, game);
+    const diff = angDiff(this.angle, desiredAng);
+    const turn = clamp(diff * 3.5 / this.turnSpeed, -1, 1);
+    this.move(dt, forward, turn, game);
+
+    let aimAng = targetAng;
+    if (!los && this.lastSeenPlayer && this.lastSeenTime < 4.0) {
+      const mx = this.lastSeenPlayer.x - this.pos.x, my = this.lastSeenPlayer.y - this.pos.y;
+      if (mx*mx + my*my > 1) aimAng = Math.atan2(my, mx) * 180 / Math.PI;
+    }
+    const aimRate = los ? 6.5 : 3.0;
+    this.turret = ((this.turret + angDiff(this.turret, aimAng) * Math.min(1, dt * aimRate)) % 360 + 360) % 360;
+
+    const aligned = Math.abs(angDiff(this.turret, aimAng)) < 9;
+    if (los && aligned && dist < this.range) this.fire(game);
+
+    this.updateTimers(dt);
+    this.collide(game);
+
+    // расталкивание врагов
+    for (const e of game.enemies) {
+      if (e === this || !e.alive) continue;
+      const dx = this.pos.x - e.pos.x, dy = this.pos.y - e.pos.y;
+      const dd = Math.hypot(dx, dy);
+      const minD = this.radius + e.radius;
+      if (dd > 0 && dd < minD) {
+        const push = (minD - dd) * 0.5;
+        const nx = dx / dd, ny = dy / dd;
+        this.pos.x += nx * push; this.pos.y += ny * push;
+        e.pos.x -= nx * push; e.pos.y -= ny * push;
+      }
+    }
+  }
+}
+
+// ============================================================
+//  ВИРТУАЛЬНЫЙ ДЖОЙСТИК
+// ============================================================
+class VirtualJoystick {
+  constructor() {
+    this.baseX = 110; this.baseY = HEIGHT - 110;
+    this.radius = 70; this.knobR = 28;
+    this.active = false;
+    this.touchId = null;
+    this.knobX = this.baseX; this.knobY = this.baseY;
+    this.forward = 0; this.turn = 0;
+  }
+  get() { return [this.forward, this.turn]; }
+
+  handlePointerDown(x, y, id) {
+    const dx = x - this.baseX, dy = y - this.baseY;
+    if (Math.hypot(dx, dy) < this.radius + 40 && !this.active) {
+      this.active = true; this.touchId = id;
+      this.knobX = x; this.knobY = y;
+      return true;
+    }
+    return false;
+  }
+  handlePointerMove(x, y, id) {
+    if (this.active && id === this.touchId) { this.knobX = x; this.knobY = y; return true; }
+    return false;
+  }
+  handlePointerUp(id) {
+    if (this.active && id === this.touchId) {
+      this.active = false; this.touchId = null;
+      this.knobX = this.baseX; this.knobY = this.baseY;
+      return true;
+    }
+    return false;
+  }
+  update() {
+    if (this.active) {
+      let dx = this.knobX - this.baseX, dy = this.knobY - this.baseY;
+      const d = Math.hypot(dx, dy);
+      if (d > this.radius) {
+        dx = dx / d * this.radius; dy = dy / d * this.radius;
+        this.knobX = this.baseX + dx; this.knobY = this.baseY + dy;
+      }
+      this.forward = -dy / this.radius;
+      this.turn = dx / this.radius;
+    } else { this.forward = 0; this.turn = 0; }
+  }
+  draw(g) {
+    g.beginPath();
+    g.arc(this.baseX, this.baseY, this.radius, 0, TAU);
+    g.fillStyle = 'rgba(255,255,255,0.15)'; g.fill();
+    g.strokeStyle = 'rgba(255,255,255,0.4)'; g.lineWidth = 3; g.stroke();
+    g.beginPath();
+    g.arc(this.knobX, this.knobY, this.knobR, 0, TAU);
+    g.fillStyle = this.active ? 'rgb(120,220,255)' : 'rgb(180,200,220)'; g.fill();
+    g.strokeStyle = 'rgb(255,255,255)'; g.lineWidth = 3; g.stroke();
+    drawText(g, 'MOVE', 'bold 13px Consolas', [200,220,255], this.baseX, this.baseY - this.radius - 20, true);
+  }
+}
+
+// ============================================================
+//  КНОПКА ОГНЯ
+// ============================================================
+class FireButton {
+  constructor() {
+    this.x = WIDTH - 110; this.y = HEIGHT - 110;
+    this.radius = 60;
+    this.pressed = false;
+    this.touchId = null;
+  }
+  handlePointerDown(px, py, id) {
+    if (Math.hypot(px - this.x, py - this.y) < this.radius && !this.pressed) {
+      this.pressed = true; this.touchId = id; return true;
+    }
+    return false;
+  }
+  handlePointerUp(id) {
+    if (this.pressed && id === this.touchId) { this.pressed = false; this.touchId = null; return true; }
+    return false;
+  }
+  draw(g) {
+    const col = this.pressed ? [255,90,90] : [220,70,70];
+    drawGlow(g, this.x, this.y, this.radius * 1.4, col, 0.6);
+    g.fillStyle = rgb(col);
+    g.beginPath(); g.arc(this.x, this.y, this.radius, 0, TAU); g.fill();
+    g.strokeStyle = 'rgb(255,255,255)'; g.lineWidth = 3;
+    g.beginPath(); g.arc(this.x, this.y, this.radius, 0, TAU); g.stroke();
+    drawText(g, 'FIRE', 'bold 32px Impact', [255,255,255], this.x, this.y, true);
+  }
+}
+
+// ============================================================
+//  ИГРА
+// ============================================================
+class Game {
+  constructor() {
+    this.bg = makeBackground();
+    this.camera = new Camera();
+    this.time = 0;
+    this.joystick = new VirtualJoystick();
+    this.fireButton = new FireButton();
+    this.keys = {};
+    this.mouseX = 0; this.mouseY = 0;
+    this.mouseDown = false;
+    this.lastMouseMove = -10;
+    this._lastMouse = null;
+    this.reset();
+    this.state = 'menu';
+  }
+
+  reset() {
+    this.walls = makeWalls();
+    this.player = new Player(WORLD_W / 2, WORLD_H / 2);
+    this.enemies = [];
+    this.bullets = [];
+    this.particles = [];
+    this.shockwaves = [];
+    this.powerups = [];
+    this.flashes = [];
+    this.popups = [];
+    this.rubble = [];
+    this.score = 0; this.kills = 0;
+    this.combo = 0; this.comboTimer = 0;
+    this.wave = 0; this.waveTimer = 2.0; this.waveBanner = 0;
+    this.time = 0;
+    this.camera.x = this.player.pos.x;
+    this.camera.y = this.player.pos.y;
+    this.state = 'playing';
+  }
+
+  mouseActive() { return (this.time - this.lastMouseMove) < 1.2; }
+
+  explode(x, y, size = 1.0, color = [255,180,70], sound = true) {
+    for (let i = 0; i < 20 * size | 0; i++) {
+      const a = Math.random() * TAU;
+      const sp = (60 + Math.random() * 360) * size;
+      const cols = [[255,230,140],[255,170,60],[255,110,40],[255,255,220]];
+      const c = cols[Math.random() * 4 | 0];
+      this.particles.push(new Particle(
+        x, y, Math.cos(a) * sp, Math.sin(a) * sp,
+        0.22 + Math.random() * 0.48,
+        (2 + Math.random() * 3) * size, c, 0.9
+      ));
+    }
+    for (let i = 0; i < 10 * size | 0; i++) {
+      const a = Math.random() * TAU;
+      const sp = (15 + Math.random() * 65) * size;
+      this.particles.push(new Particle(
+        x, y, Math.cos(a) * sp, Math.sin(a) * sp,
+        0.5 + Math.random() * 0.7,
+        (6 + Math.random() * 7) * size,
+        [70,70,78], 0.94, 0, 'smoke'
+      ));
+    }
+    this.shockwaves.push(new Shockwave(x, y, 80 * size, color, 7 * size | 0, 620));
+    this.flashes.push({ x, y, t: 0.10 * size });
+    if (sound) this.camera.shake(6 * size);
+  }
+
+  hitWall(wall, x, y, dmg, dirv) {
+    for (let i = 0; i < 8; i++) {
+      const a = Math.random() * TAU;
+      const sp = 60 + Math.random() * 180;
+      this.particles.push(new Particle(
+        x, y, Math.cos(a) * sp, Math.sin(a) * sp,
+        0.12 + Math.random() * 0.23,
+        1.5 + Math.random() * 1.5, [255,200,110], 0.88
+      ));
+    }
+    if (wall.destructible) {
+      const base = wallBaseColor(wall);
+      for (let i = 0; i < 3; i++) {
+        const a = Math.random() * TAU;
+        const sp = 100 + Math.random() * 180;
+        this.rubble.push(new Rubble(
+          x, y, 3 + Math.random() * 2, base,
+          Math.cos(a) * sp + dirv.x * -70,
+          Math.sin(a) * sp + dirv.y * -70,
+          Math.random() * 360, Math.random() * 1000 - 500,
+          1.2 + Math.random() * 1.3
+        ));
+      }
+    }
+    const destroyed = wall.hit(dmg);
+    this.camera.shake(1.5);
+    if (destroyed) this.breakWall(wall, x, y);
+  }
+
+  breakWall(wall, hx, hy) {
+    const idx = this.walls.indexOf(wall);
+    if (idx >= 0) this.walls.splice(idx, 1);
+
+    let baseCol;
+    if (wall.destructible) {
+      const ratio = clamp(wall.hp / wall.maxHp, 0, 1);
+      const b = wallBaseColor(wall);
+      baseCol = [b[0]*ratio + 40*(1-ratio), b[1]*ratio + 28*(1-ratio), b[2]*ratio + 18*(1-ratio)];
+    } else baseCol = wallBaseColor(wall);
+
+    const chunk = Math.max(18, Math.min(30, Math.min(wall.w, wall.h) / 3 | 0));
+    const cols = Math.max(1, wall.w / chunk | 0);
+    const rows = Math.max(1, wall.h / chunk | 0);
+    const cw = wall.w / cols, ch = wall.h / rows;
+    for (let ix = 0; ix < cols; ix++) {
+      for (let iy = 0; iy < rows; iy++) {
+        const cx = wall.x + cw * (ix + 0.5);
+        const cy = wall.y + ch * (iy + 0.5);
+        const dx = cx - hx, dy = cy - hy;
+        const dist = Math.max(1, Math.hypot(dx, dy));
+        const nx = dx / dist, ny = dy / dist;
+        const speed = clamp(480 - dist * 0.6, 80, 420) * (0.6 + Math.random() * 0.7);
+        const vx = nx * speed + (Math.random() * 120 - 60);
+        const vy = ny * speed + (Math.random() * 120 - 60);
+        const size = Math.max(cw, ch) * 0.55;
+        const life = 4 + Math.random() * 4;
+        this.rubble.push(new Rubble(cx, cy, size, baseCol, vx, vy,
+          Math.random() * 360, Math.random() * 1000 - 500, life));
+      }
+    }
+
+    const nDust = Math.max(10, wall.w * wall.h / 500 | 0);
+    for (let i = 0; i < nDust; i++) {
+      const a = Math.random() * TAU;
+      const sp = 30 + Math.random() * 150;
+      const cols = [[120,100,80],[90,80,70],[150,130,100],[60,55,50]];
+      const c = cols[Math.random() * 4 | 0];
+      this.particles.push(new Particle(
+        hx, hy, Math.cos(a) * sp, Math.sin(a) * sp,
+        0.5 + Math.random() * 0.9,
+        5 + Math.random() * 7, c, 0.94, 0, 'smoke'
+      ));
+    }
+    for (let i = 0; i < 14; i++) {
+      const a = Math.random() * TAU;
+      const sp = 90 + Math.random() * 290;
+      const cols = [[255,230,140],[255,170,60],[255,120,40]];
+      const c = cols[Math.random() * 3 | 0];
+      this.particles.push(new Particle(
+        hx, hy, Math.cos(a) * sp, Math.sin(a) * sp,
+        0.18 + Math.random() * 0.32,
+        2 + Math.random() * 2, c, 0.9
+      ));
+    }
+
+    this.shockwaves.push(new Shockwave(hx, hy, 100, [255,220,150], 8, 700));
+    this.flashes.push({ x: hx, y: hy, t: 0.14 });
+    this.camera.shake(8);
+
+    if (wall.explosive) {
+      this.chainExplosion(wall.x + wall.w / 2, wall.y + wall.h / 2, 150, 65);
+    }
+  }
+
+  chainExplosion(x, y, radius, damage) {
+    this.explode(x, y, 1.8, [255,170,60]);
+    const toBreak = [];
+    for (const w of this.walls) {
+      const ccx = clamp(x, w.x, w.x + w.w);
+      const ccy = clamp(y, w.y, w.y + w.h);
+      const d = Math.hypot(x - ccx, y - ccy);
+      if (d < radius) {
+        const falloff = 1 - d / radius;
+        const dmg = damage * falloff;
+        if (w.destructible) {
+          w.hp -= dmg; w.flash = 0.6;
+          if (w.hp <= 0) toBreak.push(w);
+        }
+      }
+    }
+    for (const w of toBreak) if (this.walls.includes(w)) this.breakWall(w, w.x + w.w/2, w.y + w.h/2);
+    const allTargets = [this.player, ...this.enemies];
+    for (const t of allTargets) {
+      if (!t.alive) continue;
+      const d = Math.hypot(t.pos.x - x, t.pos.y - y);
+      if (d < radius + t.radius) {
+        const falloff = 1 - clamp(d / (radius + t.radius), 0, 1);
+        t.takeDamage(damage * falloff * 0.8 | 0, this);
+      }
+    }
+  }
+
+  spawnWave() {
+    this.wave++;
+    this.waveBanner = 2.2;
+    const w = this.wave;
+    const count = 3 + (w * 1.2 | 0);
+    const pool = ['grunt'], weights = [Math.max(0.5, 6 - w * 0.3)];
+    if (w >= 2) { pool.push('scout'); weights.push(4.0); }
+    if (w >= 3) { pool.push('heavy'); weights.push(3.0); }
+    if (w >= 4) { pool.push('sniper'); weights.push(2.5); }
+    const total = weights.reduce((a, b) => a + b, 0);
+    for (let i = 0; i < count; i++) {
+      let r = Math.random() * total, acc = 0, pick = pool[0];
+      for (let j = 0; j < pool.length; j++) { acc += weights[j]; if (r < acc) { pick = pool[j]; break; } }
+      const pos = this.findSpawn();
+      if (pos) this.enemies.push(new Enemy(pos.x, pos.y, pick));
+    }
+  }
+
+  findSpawn() {
+    for (let i = 0; i < 100; i++) {
+      const x = 120 + Math.random() * (WORLD_W - 240);
+      const y = 120 + Math.random() * (WORLD_H - 240);
+      const dx = x - this.player.pos.x, dy = y - this.player.pos.y;
+      if (dx*dx + dy*dy < 600 * 600) continue;
+      let ok = true;
+      for (const w of this.walls) {
+        if (x >= w.x - 70 && x <= w.x + w.w + 70 && y >= w.y - 70 && y <= w.y + w.h + 70) { ok = false; break; }
+      }
+      if (ok) return { x, y };
+    }
+    return null;
+  }
+
+  update(dt) {
+    this.time += dt;
+    this.joystick.update();
+
+    if (this.state === 'menu') {
+      if (Math.random() < 0.3) {
+        const a = Math.random() * TAU;
+        const sp = 30 + Math.random() * 100;
+        this.particles.push(new Particle(
+          WORLD_W/2, WORLD_H/2, Math.cos(a) * sp, Math.sin(a) * sp,
+          0.4 + Math.random() * 0.6,
+          2 + Math.random() * 2, [90,150,235], 0.95
+        ));
+      }
+      this.updateEffects(dt); return;
+    }
+    if (this.state === 'paused') return;
+    if (this.state === 'gameover') {
+      this.updateEffects(dt);
+      this.camera.update(this.player.pos.x, this.player.pos.y, dt);
+      return;
+    }
+
+    this.player.update(dt, this);
+    for (const e of this.enemies) e.update(dt, this);
+    this.enemies = this.enemies.filter(e => e.alive);
+
+    for (const b of this.bullets) b.update(dt, this);
+    this.bullets = this.bullets.filter(b => !b.dead);
+
+    for (let i = this.powerups.length - 1; i >= 0; i--) {
+      if (!this.powerups[i].update(dt)) this.powerups.splice(i, 1);
+    }
+
+    for (const w of this.walls) {
+      if (w.flash > 0) w.flash = Math.max(0, w.flash - dt * 3);
+    }
+
+    this.updateEffects(dt);
+    this.camera.update(this.player.pos.x, this.player.pos.y, dt);
+
+    if (this.comboTimer > 0) {
+      this.comboTimer -= dt;
+      if (this.comboTimer <= 0) this.combo = 0;
+    }
+
+    if (this.enemies.length === 0) {
+      this.waveTimer -= dt;
+      if (this.waveTimer <= 0) { this.spawnWave(); this.waveTimer = 3.0; }
+    }
+    this.waveBanner = Math.max(0, this.waveBanner - dt);
+  }
+
+  updateEffects(dt) {
+    this.particles = this.particles.filter(p => p.update(dt));
+    if (this.particles.length > 1200) this.particles = this.particles.slice(-1200);
+    this.shockwaves = this.shockwaves.filter(s => s.update(dt));
+    for (let i = this.flashes.length - 1; i >= 0; i--) {
+      this.flashes[i].t -= dt;
+      if (this.flashes[i].t <= 0) this.flashes.splice(i, 1);
+    }
+    for (let i = this.popups.length - 1; i >= 0; i--) {
+      const p = this.popups[i];
+      p.y -= dt * 40; p.life -= dt;
+      if (p.life <= 0) this.popups.splice(i, 1);
+    }
+    this.rubble = this.rubble.filter(r => r.update(dt));
+    if (this.rubble.length > 350) this.rubble = this.rubble.slice(-350);
+  }
+
+  draw() {
+    const cam = this.camera;
+    let sx = cam.x - WIDTH/2 - cam.ox;
+    let sy = cam.y - HEIGHT/2 - cam.oy;
+    sx = clamp(sx, 0, WORLD_W - WIDTH);
+    sy = clamp(sy, 0, WORLD_H - HEIGHT);
+    ctx.drawImage(this.bg, sx, sy, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT);
+
+    for (const w of this.walls) drawWall(ctx, w, cam);
+    for (const r of this.rubble) r.draw(ctx, cam);
+    for (const pu of this.powerups) pu.draw(ctx, cam);
+    if (this.player.alive) this.player.draw(ctx, cam, this);
+    for (const e of this.enemies) if (e.alive) e.draw(ctx, cam, this);
+    for (const b of this.bullets) b.draw(ctx, cam);
+    this.drawParticles(cam);
+    for (const s of this.shockwaves) s.draw(ctx, cam);
+    for (const f of this.flashes) {
+      const p = cam.toScreen(f.x, f.y);
+      drawGlow(ctx, p.x, p.y, 40, [255,220,150], 0.6);
+    }
+    for (const pu of this.popups) {
+      const p = cam.toScreen(pu.x, pu.y);
+      drawText(ctx, pu.text, 'bold 18px Consolas', pu.color, p.x, p.y, true, darken(pu.color, 0.6), 2);
+    }
+    // красная виньетка при низком HP
+    if (this.player.alive && this.player.hp / this.player.maxHp < 0.35) {
+      const pulse = (Math.sin(this.time * 6) * 0.5 + 0.5) * 0.45;
+      ctx.fillStyle = `rgba(180,20,30,${90 * pulse / 255})`;
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    }
+
+    this.joystick.draw(ctx);
+    this.fireButton.draw(ctx);
+    this.drawHUD();
+  }
+
+  drawParticles(cam) {
+    for (const p of this.particles) {
+      const sp = cam.toScreen(p.px, p.py);
+      if (sp.x < -30 || sp.x > WIDTH + 30 || sp.y < -30 || sp.y > HEIGHT + 30) continue;
+      const t = p.life / p.maxLife;
+      if (p.kind === 'smoke') {
+        const r = p.size * (2.0 - t);
+        const a = 150 * t / 255;
+        ctx.fillStyle = rgb(p.color, a);
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, r, 0, TAU); ctx.fill();
+      } else {
+        const a = clamp(t, 0, 1);
+        const r = Math.max(1, p.size * a);
+        const col = [p.color[0]*a|0, p.color[1]*a|0, p.color[2]*a|0];
+        ctx.fillStyle = rgb(col);
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, r, 0, TAU); ctx.fill();
+      }
+    }
+  }
+
+  drawHUD() {
+    ctx.fillStyle = 'rgba(8,10,16,0.6)';
+    ctx.fillRect(0, 0, WIDTH, 40);
+    ctx.strokeStyle = 'rgb(90,140,220)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, 40); ctx.lineTo(WIDTH, 40); ctx.stroke();
+
+    drawText(ctx, `SCORE ${this.score.toString().padStart(7, ' ')}`,
+      'bold 18px Consolas', [220,235,255], 16, 10, false, [40,80,160], 2);
+    drawText(ctx, `WAVE ${this.wave}`, 'bold 18px Consolas', [255,210,120], WIDTH/2 - 40, 10);
+    drawText(ctx, `KILLS ${this.kills}`, 'bold 18px Consolas', [200,220,255], WIDTH - 130, 10);
+
+    if (this.combo > 1) {
+      const c = Math.min(255, 150 + this.combo * 12);
+      drawText(ctx, `x${this.combo} COMBO`, 'bold 38px Impact', [c,200,90],
+        WIDTH/2, 70, true, [120,60,0], 3);
+    }
+
+    const p = this.player;
+    const hx = 16, hy = HEIGHT - 40, hw = 240, hh = 20;
+    drawRect(ctx, [12,14,20], hx-2, hy-2, hw+4, hh+4, 6);
+    drawRect(ctx, [40,46,60], hx, hy, hw, hh, 4);
+    const ratio = clamp(p.hp / p.maxHp, 0, 1);
+    const col = ratio > 0.5 ? [60,220,120] : (ratio > 0.25 ? [250,200,70] : [240,70,70]);
+    if (ratio > 0) drawRect(ctx, col, hx, hy, hw * ratio, hh, 4);
+    drawRect(ctx, [130,160,200], hx, hy, hw, hh, 4, 2);
+    drawText(ctx, `HP ${p.hp | 0}/${p.maxHp}`, 'bold 13px Consolas', [235,245,255], hx+6, hy+3);
+
+    let y = HEIGHT - 90, x = WIDTH - 170;
+    const stats = [['RAPID', p.rapid], ['TRIPLE', p.triple], ['SPEED', p.speedBoost], ['SHIELD', p.shield]];
+    for (const [name, val] of stats) {
+      if (val > 0) {
+        const key = name.toLowerCase();
+        const c = POWER_TYPES[key].color;
+        drawRect(ctx, [14,16,24], x, y, 156, 18, 4);
+        drawRect(ctx, c, x, y, 156 * Math.min(1, val / 10), 18, 4);
+        drawText(ctx, name, 'bold 13px Consolas', [255,255,255], x + 6, y + 2);
+        y -= 22;
+      }
+    }
+
+    if (this.waveBanner > 0) {
+      drawText(ctx, `ВОЛНА ${this.wave}`, 'bold 72px Impact', [255,220,130],
+        WIDTH/2, HEIGHT/2 - 70, true, [150,70,0], 4);
+      drawText(ctx, 'ПРИГОТОВЬСЯ', 'bold 18px Consolas', [255,255,255],
+        WIDTH/2, HEIGHT/2 - 15, true);
+    }
+  }
+
+  drawMenu() {
+    const sx = WORLD_W/2 - WIDTH/2, sy = WORLD_H/2 - HEIGHT/2;
+    ctx.drawImage(this.bg, sx, sy, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT);
+    ctx.fillStyle = 'rgba(6,8,14,0.72)';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    const t = performance.now() / 1000;
+    for (let i = 0; i < this.particles.length; i++) {
+      const p = this.particles[i];
+      const px = WIDTH/2 + Math.cos(i*2.3 + t) * 250;
+      const py = HEIGHT/2 + Math.sin(i*1.7 + t) * 140;
+      ctx.fillStyle = rgb(p.color);
+      ctx.beginPath(); ctx.arc(px, py, Math.max(1, p.size), 0, TAU); ctx.fill();
+    }
+
+    drawText(ctx, 'STEEL STORM', 'bold 72px Impact', [255,235,180],
+      WIDTH/2, 100, true, [220,90,20], 5);
+    drawText(ctx, 'ВЕБ-ВЕРСИЯ', 'bold 38px Impact', [140,200,255],
+      WIDTH/2, 165, true, [20,70,160], 3);
+
+    const boxX = WIDTH/2 - 260, boxY = 220, boxW = 520, boxH = 210;
+    ctx.fillStyle = 'rgba(14,18,28,0.75)';
+    roundRect(ctx, boxX, boxY, boxW, boxH, 10); ctx.fill();
+    ctx.strokeStyle = 'rgb(90,150,230)'; ctx.lineWidth = 2;
+    roundRect(ctx, boxX, boxY, boxW, boxH, 10); ctx.stroke();
+
+    const lines = [
+      ['WASD / ДЖОЙСТИК', 'движение'],
+      ['МЫШЬ / АВТО',    'наведение башни'],
+      ['ЛКМ / FIRE',     'огонь'],
+      ['SHIFT',          'рывок'],
+    ];
+    let yy = boxY + 14;
+    for (const [k, v] of lines) {
+      drawText(ctx, k, 'bold 18px Consolas', [255,215,120], boxX + 20, yy);
+      drawText(ctx, v, 'bold 13px Consolas', [190,205,225], boxX + 220, yy + 3);
+      yy += 26;
+    }
+
+    const pulse = 0.5 + 0.5 * Math.sin(t * 4);
+    const col = [120 + 135*pulse, 230 - 40*pulse, 150 + 60*pulse];
+    drawText(ctx, 'НАЖМИ ПРОБЕЛ ИЛИ ТАПНИ ЭКРАН', 'bold 18px Consolas', col,
+      WIDTH/2, 480, true, [20,90,50], 3);
+    drawText(ctx, 'Стреляй в бочки — они рушат стены рядом', 'bold 13px Consolas',
+      [255,210,140], WIDTH/2, 520, true);
+  }
+
+  drawGameover() {
+    ctx.fillStyle = 'rgba(40,4,8,0.6)';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    const t = performance.now() / 1000;
+    drawText(ctx, 'УНИЧТОЖЕН', 'bold 72px Impact', [255,90,90],
+      WIDTH/2, 160, true, [180,0,0], 6);
+    drawText(ctx, `СЧЁТ: ${this.score}`, 'bold 38px Impact', [255,230,160],
+      WIDTH/2, 260, true, [120,70,0], 3);
+    drawText(ctx, `ВОЛНА: ${this.wave}    УБИЙСТВ: ${this.kills}`, 'bold 18px Consolas',
+      [220,235,255], WIDTH/2, 320, true);
+    const pulse = 0.5 + 0.5 * Math.sin(t * 4);
+    drawText(ctx, 'R — ЗАНОВО', 'bold 18px Consolas',
+      [150 + 100*pulse, 220, 180], WIDTH/2, 390, true);
+  }
+
+  drawPause() {
+    ctx.fillStyle = 'rgba(6,10,18,0.67)';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    drawText(ctx, 'ПАУЗА', 'bold 72px Impact', [200,225,255], WIDTH/2, HEIGHT/2 - 30,
+      true, [30,70,150], 4);
+    drawText(ctx, 'P / ESC — продолжить', 'bold 18px Consolas', [180,200,225],
+      WIDTH/2, HEIGHT/2 + 40, true);
+  }
+}
+
+// ============================================================
+//  УПРАВЛЕНИЕ
+// ============================================================
+const game = new Game();
+
+// Клавиатура
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  game.keys[k] = true;
+
+  if (k === 'escape' || k === 'p') {
+    if (game.state === 'playing') game.state = 'paused';
+    else if (game.state === 'paused') game.state = 'playing';
+  } else if (k === ' ') {
+    if (game.state === 'menu') { game.reset(); game.state = 'playing'; }
+    e.preventDefault();
+  } else if (k === 'r') {
+    if (game.state === 'gameover') { game.reset(); game.state = 'playing'; }
+  } else if (['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) {
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => {
+  game.keys[e.key.toLowerCase()] = false;
+});
+
+// Мышь
+function canvasCoords(e) {
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (WIDTH / rect.width);
+  const y = (e.clientY - rect.top) * (HEIGHT / rect.height);
+  return { x, y };
+}
+
+canvas.addEventListener('mousemove', e => {
+  const { x, y } = canvasCoords(e);
+  if (game._lastMouse && (x !== game._lastMouse.x || y !== game._lastMouse.y)) {
+    game.lastMouseMove = game.time;
+  }
+  game._lastMouse = { x, y };
+  game.mouseX = x; game.mouseY = y;
+});
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  const { x, y } = canvasCoords(e);
+  game.mouseDown = true;
+  if (game.state === 'menu') { game.reset(); game.state = 'playing'; return; }
+  game.joystick.handlePointerDown(x, y, -1);
+  game.fireButton.handlePointerDown(x, y, -1);
+});
+canvas.addEventListener('mouseup', () => {
+  game.mouseDown = false;
+  game.joystick.handlePointerUp(-1);
+  game.fireButton.handlePointerUp(-1);
+});
+
+// Тач
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (t.clientX - rect.left) * (WIDTH / rect.width);
+    const y = (t.clientY - rect.top) * (HEIGHT / rect.height);
+    if (game.state === 'menu') { game.reset(); game.state = 'playing'; continue; }
+    if (game.joystick.handlePointerDown(x, y, t.identifier)) continue;
+    game.fireButton.handlePointerDown(x, y, t.identifier);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (t.clientX - rect.left) * (WIDTH / rect.width);
+    const y = (t.clientY - rect.top) * (HEIGHT / rect.height);
+    if (game.joystick.handlePointerMove(x, y, t.identifier)) continue;
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    game.joystick.handlePointerUp(t.identifier);
+    game.fireButton.handlePointerUp(t.identifier);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchcancel', e => {
+  for (const t of e.changedTouches) {
+    game.joystick.handlePointerUp(t.identifier);
+    game.fireButton.handlePointerUp(t.identifier);
+  }
+});
+
+// ============================================================
+//  ГЛАВНЫЙ ЦИКЛ
+// ============================================================
+let lastTime = performance.now();
+function loop(now) {
+  const dt = Math.min((now - lastTime) / 1000, 1 / 30);
+  lastTime = now;
+
+  game.update(dt);
+
+  if (game.state === 'menu') {
+    game.drawMenu();
+  } else {
+    game.draw();
+    if (game.state === 'gameover') game.drawGameover();
+    else if (game.state === 'paused') game.drawPause();
+  }
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

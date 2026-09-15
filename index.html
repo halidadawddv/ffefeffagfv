@@ -2,16 +2,21 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
 <title>STEEL STORM — Web Edition</title>
 <style>
   html, body {
     margin: 0; padding: 0; overflow: hidden;
-    background: #0a0c12; height: 100%;
+    background: #0a0c12; height: 100%; width: 100%;
     font-family: 'Consolas', monospace;
-    touch-action: none; user-select: none;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
   }
-  #game { display: block; margin: 0 auto; background: #0a0c12; }
+  #game { display: block; margin: 0 auto; background: #0a0c12; touch-action: none; }
   #wrap {
     position: fixed; inset: 0;
     display: flex; align-items: center; justify-content: center;
@@ -34,13 +39,13 @@ const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 canvas.width = WIDTH; canvas.height = HEIGHT;
 
-// Автомасштаб под окно
 function fitCanvas() {
   const scale = Math.min(window.innerWidth / WIDTH, window.innerHeight / HEIGHT);
   canvas.style.width  = (WIDTH  * scale) + 'px';
   canvas.style.height = (HEIGHT * scale) + 'px';
 }
 window.addEventListener('resize', fitCanvas);
+window.addEventListener('orientationchange', () => setTimeout(fitCanvas, 100));
 fitCanvas();
 
 // ============================================================
@@ -56,7 +61,6 @@ const rgb = (c, a) => a === undefined
   ? `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`
   : `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
 
-function vLen(x, y) { return Math.hypot(x, y); }
 function vNorm(x, y) {
   const l = Math.hypot(x, y);
   return l > 0.0001 ? { x: x / l, y: y / l } : { x: 0, y: 0 };
@@ -80,7 +84,6 @@ function drawRect(g, color, x, y, w, h, radius = 0, strokeWidth = 0) {
   else { g.fillStyle = rgb(color); g.fill(); }
 }
 
-// Свечение — просто radial gradient
 function drawGlow(g, x, y, radius, color, alpha = 0.6) {
   const grad = g.createRadialGradient(x, y, 0, x, y, radius);
   grad.addColorStop(0, rgb(color, alpha));
@@ -91,15 +94,11 @@ function drawGlow(g, x, y, radius, color, alpha = 0.6) {
   g.fill();
 }
 
-// Текст с обводкой/свечением
 function drawText(g, text, font, color, x, y, center = false, glow = null, gsize = 2) {
   g.font = font;
   g.textAlign = center ? 'center' : 'left';
   g.textBaseline = center ? 'middle' : 'top';
-  if (glow) {
-    g.shadowColor = rgb(glow);
-    g.shadowBlur = gsize * 3;
-  }
+  if (glow) { g.shadowColor = rgb(glow); g.shadowBlur = gsize * 3; }
   g.fillStyle = rgb(color);
   g.fillText(text, x, y);
   g.shadowBlur = 0;
@@ -142,9 +141,7 @@ class Shockwave {
     if (this.r < 1) return;
     g.strokeStyle = rgb(this.color, a);
     g.lineWidth = w;
-    g.beginPath();
-    g.arc(p.x, p.y, this.r, 0, TAU);
-    g.stroke();
+    g.beginPath(); g.arc(p.x, p.y, this.r, 0, TAU); g.stroke();
   }
 }
 
@@ -185,13 +182,11 @@ function makeBackground() {
   const bg = document.createElement('canvas');
   bg.width = WORLD_W; bg.height = WORLD_H;
   const g = bg.getContext('2d');
-  // вертикальный градиент
   const grad = g.createLinearGradient(0, 0, 0, WORLD_H);
   grad.addColorStop(0, 'rgb(16,18,26)');
   grad.addColorStop(1, 'rgb(24,28,38)');
   g.fillStyle = grad;
   g.fillRect(0, 0, WORLD_W, WORLD_H);
-  // пятна
   for (let i = 0; i < 300; i++) {
     const x = Math.random() * WORLD_W, y = Math.random() * WORLD_H;
     const r = 30 + Math.random() * 110;
@@ -200,7 +195,6 @@ function makeBackground() {
     g.fillStyle = rgb(c, 0.18);
     g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
   }
-  // сетка
   g.strokeStyle = 'rgba(120,170,255,0.04)';
   g.lineWidth = 1;
   for (let x = 0; x < WORLD_W; x += 80) {
@@ -334,11 +328,9 @@ function drawWall(g, w, cam) {
     drawRect(g, darken(base, 0.55), sp.x + w.w - 3, sp.y, 3, w.h);
   }
 
-  // Трещины — детерминированные через псевдослучайный генератор
   if (w.destructible) {
     const ratio = clamp(w.hp / w.maxHp, 0, 1);
     if (ratio < 0.9) {
-      // простой seed-based PRNG
       let seed = w.seed;
       const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
       const n = ((1 - ratio) * 10 | 0) + 2;
@@ -439,7 +431,6 @@ class Bullet {
     if (this.x < -60 || this.x > WORLD_W + 60 || this.y < -60 || this.y > WORLD_H + 60) {
       this.dead = true; return;
     }
-    // стены
     for (const w of game.walls) {
       if (this.x >= w.x && this.x <= w.x + w.w && this.y >= w.y && this.y <= w.y + w.h) {
         this.dead = true;
@@ -448,7 +439,6 @@ class Bullet {
         return;
       }
     }
-    // цели
     const targets = this.owner === game.player ? game.enemies : [game.player];
     for (const t of targets) {
       if (!t.alive || t === this.owner) continue;
@@ -494,7 +484,6 @@ class Powerup {
     const bob = Math.sin(this.t * 3) * 4;
     const R = 16 * pulse;
     drawGlow(g, p.x, p.y + bob, 26, col, 0.7);
-    // ромб
     g.fillStyle = rgb(darken(col, 0.5));
     g.beginPath();
     for (let i = 0; i < 4; i++) {
@@ -669,13 +658,11 @@ class Tank {
     const ca = Math.cos(a), sa = Math.sin(a);
     const R = (x, y) => ({ x: p.x + x*ca - y*sa, y: p.y + x*sa + y*ca });
 
-    // тень
     g.fillStyle = 'rgba(0,0,0,0.35)';
     g.beginPath();
     g.ellipse(p.x + 4, p.y + 6, 26, 20, 0, 0, TAU);
     g.fill();
 
-    // гусеницы
     for (const side of [-1, 1]) {
       const pts = [
         R(-24, side*13 - 6), R(24, side*13 - 6),
@@ -687,7 +674,6 @@ class Tank {
       for (let i = 1; i < 4; i++) g.lineTo(pts[i].x, pts[i].y);
       g.closePath(); g.fill();
       g.strokeStyle = 'rgb(52,56,66)'; g.lineWidth = 2; g.stroke();
-      // траки
       for (let i = 0; i < 7; i++) {
         const x = -24 + ((i * 7 + this.treadPhase) % 48);
         const tp = [R(x, side*13-6), R(x+3, side*13-6), R(x+3, side*13+6), R(x, side*13+6)];
@@ -699,7 +685,6 @@ class Tank {
       }
     }
 
-    // корпус
     const hull = [
       R(-22,-13), R(11,-13), R(22,-7), R(22,7), R(11,13), R(-22,13), R(-25,7), R(-25,-7)
     ];
@@ -718,7 +703,6 @@ class Tank {
     for (let i = 1; i < inner.length; i++) g.lineTo(inner[i].x, inner[i].y);
     g.closePath(); g.fill();
 
-    // блик
     const hi = [R(-17,-8), R(7,-8), R(15,-3), R(7,-3), R(-17,-3)];
     g.fillStyle = rgb(lighten(this.hullColor, 1.35));
     g.beginPath();
@@ -726,14 +710,12 @@ class Tank {
     for (let i = 1; i < hi.length; i++) g.lineTo(hi[i].x, hi[i].y);
     g.closePath(); g.fill();
 
-    // контур корпуса
     g.strokeStyle = rgb(this.accent); g.lineWidth = 2;
     g.beginPath();
     g.moveTo(hull[0].x, hull[0].y);
     for (let i = 1; i < hull.length; i++) g.lineTo(hull[i].x, hull[i].y);
     g.closePath(); g.stroke();
 
-    // башня
     const ta = this.turret * Math.PI / 180;
     const cta = Math.cos(ta), sta = Math.sin(ta);
     const RT = (x, y) => ({ x: p.x + x*cta - y*sta, y: p.y + x*sta + y*cta });
@@ -761,7 +743,6 @@ class Tank {
     for (let i = 1; i < 4; i++) g.lineTo(barrel[i].x, barrel[i].y);
     g.closePath(); g.stroke();
 
-    // основание башни
     g.fillStyle = rgb(darken(this.hullColor, 0.5));
     g.beginPath(); g.arc(p.x, p.y, 13, 0, TAU); g.fill();
     g.fillStyle = rgb(lighten(this.hullColor, 1.05));
@@ -771,13 +752,11 @@ class Tank {
     g.fillStyle = rgb(darken(this.hullColor, 0.4));
     g.beginPath(); g.arc(p.x, p.y, 3, 0, TAU); g.fill();
 
-    // вспышка урона
     if (this.hitFlash > 0) {
       g.fillStyle = `rgba(255,255,255,${180 * this.hitFlash / 255})`;
       g.beginPath(); g.arc(p.x, p.y, 22, 0, TAU); g.fill();
     }
 
-    // щит
     if (this.shield > 0) {
       const Rr = 30 + Math.sin(game.time * 8) * 2;
       g.strokeStyle = `rgba(100,190,255,${90/255})`;
@@ -801,13 +780,19 @@ class Player extends Tank {
   update(dt, game) {
     if (!this.alive) return;
     let forward = 0, turn = 0;
+
+    // КЛАВИАТУРА
     if (game.keys['w'] || game.keys['arrowup'])    forward += 1.0;
     if (game.keys['s'] || game.keys['arrowdown'])  forward -= 0.8;
     if (game.keys['a'] || game.keys['arrowleft'])  turn -= 1.0;
     if (game.keys['d'] || game.keys['arrowright']) turn += 1.0;
 
+    // ДЖОЙСТИК (тач/мышь) — приоритетнее клавиш
     const [jf, jt] = game.joystick.get();
-    if (jf !== 0 || jt !== 0) { forward = jf; turn = jt; }
+    if (Math.abs(jf) > 0.05 || Math.abs(jt) > 0.05) {
+      forward = jf;
+      turn = jt;
+    }
 
     const spd = this.speed * (this.speedBoost > 0 ? 1.5 : 1.0);
     let realSpd = spd;
@@ -819,7 +804,7 @@ class Player extends Tank {
 
     // наведение башни
     let targetAim = null;
-    if (game.mouseActive()) {
+    if (game.mouseActive() && !game.isTouchDevice) {
       targetAim = game.camera.toWorld(game.mouseX, game.mouseY);
     } else {
       let best = 1e9;
@@ -846,7 +831,8 @@ class Player extends Tank {
     this.boostCd = Math.max(0, this.boostCd - dt);
 
     // рывок
-    if ((game.keys['shift']) && this.boostCd <= 0 && forward !== 0) {
+    const shiftKey = game.keys['shift'];
+    if (shiftKey && this.boostCd <= 0 && forward !== 0) {
       this.boostTime = 0.28; this.boostCd = 2.0;
       game.camera.shake(4);
       for (let i = 0; i < 15; i++) {
@@ -861,8 +847,8 @@ class Player extends Tank {
       }
     }
 
-    // огонь
-    const firing = game.mouseDown || game.keys[' '] || game.fireButton.pressed;
+    // огонь — работает и с клавиши, и с кнопки FIRE, и с тапа
+    const firing = game.keys[' '] || game.fireButton.pressed || game.mouseDown;
     if (firing && this.fireCd <= 0) {
       const count = this.triple > 0 ? 3 : 1;
       const rateMul = this.rapid > 0 ? 0.4 : 1.0;
@@ -878,8 +864,8 @@ class Player extends Tank {
     // подбор бонусов
     for (let i = game.powerups.length - 1; i >= 0; i--) {
       const pu = game.powerups[i];
-      const dx = this.pos.x - pu.x, dy = this.pos.y - pu.y;
-      if (dx*dx + dy*dy < (this.radius + 22) ** 2) {
+      const dx2 = this.pos.x - pu.x, dy2 = this.pos.y - pu.y;
+      if (dx2*dx2 + dy2*dy2 < (this.radius + 22) ** 2) {
         game.powerups.splice(i, 1);
         if (pu.kind === 'health') this.hp = Math.min(this.maxHp, this.hp + 45);
         else if (pu.kind === 'shield') this.shield = 9.0;
@@ -1085,7 +1071,6 @@ class Enemy extends Tank {
     this.updateTimers(dt);
     this.collide(game);
 
-    // расталкивание врагов
     for (const e of game.enemies) {
       if (e === this || !e.alive) continue;
       const dx = this.pos.x - e.pos.x, dy = this.pos.y - e.pos.y;
@@ -1132,6 +1117,7 @@ class VirtualJoystick {
     if (this.active && id === this.touchId) {
       this.active = false; this.touchId = null;
       this.knobX = this.baseX; this.knobY = this.baseY;
+      this.forward = 0; this.turn = 0;
       return true;
     }
     return false;
@@ -1207,6 +1193,7 @@ class Game {
     this.mouseDown = false;
     this.lastMouseMove = -10;
     this._lastMouse = null;
+    this.isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
     this.reset();
     this.state = 'menu';
   }
@@ -1509,7 +1496,6 @@ class Game {
       const p = cam.toScreen(pu.x, pu.y);
       drawText(ctx, pu.text, 'bold 18px Consolas', pu.color, p.x, p.y, true, darken(pu.color, 0.6), 2);
     }
-    // красная виньетка при низком HP
     if (this.player.alive && this.player.hp / this.player.maxHp < 0.35) {
       const pulse = (Math.sin(this.time * 6) * 0.5 + 0.5) * 0.45;
       ctx.fillStyle = `rgba(180,20,30,${90 * pulse / 255})`;
@@ -1617,13 +1603,13 @@ class Game {
     const lines = [
       ['WASD / ДЖОЙСТИК', 'движение'],
       ['МЫШЬ / АВТО',    'наведение башни'],
-      ['ЛКМ / FIRE',     'огонь'],
+      ['ЛКМ / FIRE / SPACE', 'огонь'],
       ['SHIFT',          'рывок'],
     ];
     let yy = boxY + 14;
     for (const [k, v] of lines) {
       drawText(ctx, k, 'bold 18px Consolas', [255,215,120], boxX + 20, yy);
-      drawText(ctx, v, 'bold 13px Consolas', [190,205,225], boxX + 220, yy + 3);
+      drawText(ctx, v, 'bold 13px Consolas', [190,205,225], boxX + 250, yy + 3);
       yy += 26;
     }
 
@@ -1646,7 +1632,7 @@ class Game {
     drawText(ctx, `ВОЛНА: ${this.wave}    УБИЙСТВ: ${this.kills}`, 'bold 18px Consolas',
       [220,235,255], WIDTH/2, 320, true);
     const pulse = 0.5 + 0.5 * Math.sin(t * 4);
-    drawText(ctx, 'R — ЗАНОВО', 'bold 18px Consolas',
+    drawText(ctx, 'R — ЗАНОВО  (или тапни экран)', 'bold 18px Consolas',
       [150 + 100*pulse, 220, 180], WIDTH/2, 390, true);
   }
 
@@ -1661,11 +1647,11 @@ class Game {
 }
 
 // ============================================================
-//  УПРАВЛЕНИЕ
+//  УПРАВЛЕНИЕ (Pointer Events — мышь + палец + клавиатура)
 // ============================================================
 const game = new Game();
 
-// Клавиатура
+// ---------- КЛАВИАТУРА ----------
 window.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   game.keys[k] = true;
@@ -1686,73 +1672,62 @@ window.addEventListener('keyup', e => {
   game.keys[e.key.toLowerCase()] = false;
 });
 
-// Мышь
+// ---------- КООРДИНАТЫ НА КАНВАСЕ ----------
 function canvasCoords(e) {
   const rect = canvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * (WIDTH / rect.width);
-  const y = (e.clientY - rect.top) * (HEIGHT / rect.height);
-  return { x, y };
+  return {
+    x: (e.clientX - rect.left) * (WIDTH / rect.width),
+    y: (e.clientY - rect.top)  * (HEIGHT / rect.height)
+  };
 }
 
-canvas.addEventListener('mousemove', e => {
+// ---------- POINTER EVENTS ----------
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
   const { x, y } = canvasCoords(e);
-  if (game._lastMouse && (x !== game._lastMouse.x || y !== game._lastMouse.y)) {
-    game.lastMouseMove = game.time;
+
+  if (game.state === 'menu') {
+    game.reset(); game.state = 'playing'; return;
   }
-  game._lastMouse = { x, y };
-  game.mouseX = x; game.mouseY = y;
-});
-canvas.addEventListener('mousedown', e => {
-  if (e.button !== 0) return;
-  const { x, y } = canvasCoords(e);
+  if (game.state === 'gameover') {
+    game.reset(); game.state = 'playing'; return;
+  }
+
+  if (game.joystick.handlePointerDown(x, y, e.pointerId)) return;
+  if (game.fireButton.handlePointerDown(x, y, e.pointerId)) return;
+
+  // иначе — огонь + прицел (для мыши удобно)
   game.mouseDown = true;
-  if (game.state === 'menu') { game.reset(); game.state = 'playing'; return; }
-  game.joystick.handlePointerDown(x, y, -1);
-  game.fireButton.handlePointerDown(x, y, -1);
+  game.mouseX = x; game.mouseY = y;
+  if (e.pointerType === 'mouse') {
+    game.lastMouseMove = game.time;
+    game._lastMouse = { x, y };
+  }
 });
-canvas.addEventListener('mouseup', () => {
+
+canvas.addEventListener('pointermove', e => {
+  const { x, y } = canvasCoords(e);
+  if (e.pointerType === 'mouse') {
+    if (game._lastMouse && (x !== game._lastMouse.x || y !== game._lastMouse.y)) {
+      game.lastMouseMove = game.time;
+    }
+    game._lastMouse = { x, y };
+    game.mouseX = x; game.mouseY = y;
+  }
+  game.joystick.handlePointerMove(x, y, e.pointerId);
+});
+
+function onPointerUp(e) {
   game.mouseDown = false;
-  game.joystick.handlePointerUp(-1);
-  game.fireButton.handlePointerUp(-1);
-});
+  game.joystick.handlePointerUp(e.pointerId);
+  game.fireButton.handlePointerUp(e.pointerId);
+}
+canvas.addEventListener('pointerup', onPointerUp);
+canvas.addEventListener('pointercancel', onPointerUp);
+canvas.addEventListener('pointerleave', onPointerUp);
 
-// Тач
-canvas.addEventListener('touchstart', e => {
-  e.preventDefault();
-  for (const t of e.changedTouches) {
-    const rect = canvas.getBoundingClientRect();
-    const x = (t.clientX - rect.left) * (WIDTH / rect.width);
-    const y = (t.clientY - rect.top) * (HEIGHT / rect.height);
-    if (game.state === 'menu') { game.reset(); game.state = 'playing'; continue; }
-    if (game.joystick.handlePointerDown(x, y, t.identifier)) continue;
-    game.fireButton.handlePointerDown(x, y, t.identifier);
-  }
-}, { passive: false });
-
-canvas.addEventListener('touchmove', e => {
-  e.preventDefault();
-  for (const t of e.changedTouches) {
-    const rect = canvas.getBoundingClientRect();
-    const x = (t.clientX - rect.left) * (WIDTH / rect.width);
-    const y = (t.clientY - rect.top) * (HEIGHT / rect.height);
-    if (game.joystick.handlePointerMove(x, y, t.identifier)) continue;
-  }
-}, { passive: false });
-
-canvas.addEventListener('touchend', e => {
-  e.preventDefault();
-  for (const t of e.changedTouches) {
-    game.joystick.handlePointerUp(t.identifier);
-    game.fireButton.handlePointerUp(t.identifier);
-  }
-}, { passive: false });
-
-canvas.addEventListener('touchcancel', e => {
-  for (const t of e.changedTouches) {
-    game.joystick.handlePointerUp(t.identifier);
-    game.fireButton.handlePointerUp(t.identifier);
-  }
-});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 // ============================================================
 //  ГЛАВНЫЙ ЦИКЛ

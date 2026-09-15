@@ -1652,7 +1652,7 @@ class Game {
 const game = new Game();
 
 // ---------- КЛАВИАТУРА ----------
-window.addEventListener('keydown', e => {
+function onKeyDown(e) {
   const k = e.key.toLowerCase();
   game.keys[k] = true;
 
@@ -1667,10 +1667,23 @@ window.addEventListener('keydown', e => {
   } else if (['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) {
     e.preventDefault();
   }
-});
-window.addEventListener('keyup', e => {
+}
+function onKeyUp(e) {
   game.keys[e.key.toLowerCase()] = false;
-});
+}
+
+window.addEventListener('keydown', onKeyDown);
+window.addEventListener('keyup', onKeyUp);
+document.addEventListener('keydown', onKeyDown);
+document.addEventListener('keyup', onKeyUp);
+canvas.addEventListener('keydown', onKeyDown);
+canvas.addEventListener('keyup', onKeyUp);
+
+// автофокус на канвас
+canvas.tabIndex = 0;
+canvas.focus();
+canvas.addEventListener('click', () => canvas.focus());
+window.addEventListener('load', () => canvas.focus());
 
 // ---------- КООРДИНАТЫ НА КАНВАСЕ ----------
 function canvasCoords(e) {

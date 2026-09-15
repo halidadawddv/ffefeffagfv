@@ -24,7 +24,6 @@
   #game {
     display: block; background: #0a0c12;
     touch-action: none; outline: none;
-    image-rendering: auto;
   }
 </style>
 </head>
@@ -34,13 +33,17 @@
 "use strict";
 
 // ============================================================
-//  ОПРЕДЕЛЕНИЕ УСТРОЙСТВА
+//  ОПРЕДЕЛЕНИЕ УСТРОЙСТВА (только по User-Agent!)
 // ============================================================
-const IS_TOUCH = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
-const IS_MOBILE_UA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-// Тач-управление показываем только на реальных тач-устройствах без мыши
-const USE_TOUCH_CONTROLS = IS_TOUCH && (IS_MOBILE_UA || navigator.maxTouchPoints > 1);
-// На десктопе — только клавиатура+мышь
+const ua = navigator.userAgent.toLowerCase();
+const IS_IOS_UA = /iphone|ipad|ipod/.test(ua);
+const IS_ANDROID_UA = /android/.test(ua);
+// iPadOS 13+ маскируется под Mac — определяем по touch + платформе
+const IS_IPAD_PRO = (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const IS_MOBILE_DEVICE = IS_IOS_UA || IS_ANDROID_UA || IS_IPAD_PRO;
+
+// Режим тач-контролов: включаем ТОЛЬКО на настоящих мобилах
+let touchMode = IS_MOBILE_DEVICE;
 
 // ============================================================
 //  КОНСТАНТЫ
@@ -57,13 +60,9 @@ canvas.width = WIDTH; canvas.height = HEIGHT;
 //  АВТОМАСШТАБ
 // ============================================================
 function fitCanvas() {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const scale = Math.min(vw / WIDTH, vh / HEIGHT);
-  const w = Math.floor(WIDTH * scale);
-  const h = Math.floor(HEIGHT * scale);
-  canvas.style.width = w + 'px';
-  canvas.style.height = h + 'px';
+  const scale = Math.min(window.innerWidth / WIDTH, window.innerHeight / HEIGHT);
+  canvas.style.width  = Math.floor(WIDTH * scale) + 'px';
+  canvas.style.height = Math.floor(HEIGHT * scale) + 'px';
 }
 window.addEventListener('resize', fitCanvas);
 window.addEventListener('orientationchange', () => setTimeout(fitCanvas, 150));
@@ -111,9 +110,7 @@ function drawGlow(g, x, y, radius, color, alpha = 0.6) {
   grad.addColorStop(0, rgb(color, alpha));
   grad.addColorStop(1, rgb(color, 0));
   g.fillStyle = grad;
-  g.beginPath();
-  g.arc(x, y, radius, 0, TAU);
-  g.fill();
+  g.beginPath(); g.arc(x, y, radius, 0, TAU); g.fill();
 }
 
 function drawText(g, text, font, color, x, y, center = false, glow = null, gsize = 2) {
@@ -809,8 +806,8 @@ class Player extends Tank {
     if (game.keys['a'] || game.keys['arrowleft'])  turn -= 1.0;
     if (game.keys['d'] || game.keys['arrowright']) turn += 1.0;
 
-    // ТАЧ-ДЖОЙСТИК (только если он есть)
-    if (USE_TOUCH_CONTROLS) {
+    // ТАЧ-ДЖОЙСТИК (только на мобилах)
+    if (touchMode) {
       const [jf, jt] = game.joystick.get();
       if (Math.abs(jf) > 0.05 || Math.abs(jt) > 0.05) {
         forward = jf;
@@ -828,11 +825,9 @@ class Player extends Tank {
 
     // НАВЕДЕНИЕ БАШНИ
     let targetAim = null;
-    if (!USE_TOUCH_CONTROLS && game.mouseActive()) {
-      // На компьютере — мышь
+    if (!touchMode && game.mouseActive()) {
       targetAim = game.camera.toWorld(game.mouseX, game.mouseY);
     } else {
-      // На таче или когда мышь не двигалась — авто-наведение
       let best = 1e9;
       for (const e of game.enemies) {
         if (!e.alive) continue;
@@ -856,7 +851,7 @@ class Player extends Tank {
     this.boostTime = Math.max(0, this.boostTime - dt);
     this.boostCd = Math.max(0, this.boostCd - dt);
 
-    // РЫВОК (только Shift)
+    // РЫВОК
     if (game.keys['shift'] && this.boostCd <= 0 && forward !== 0) {
       this.boostTime = 0.28; this.boostCd = 2.0;
       game.camera.shake(4);
@@ -874,7 +869,7 @@ class Player extends Tank {
 
     // ОГОНЬ
     let firing = false;
-    if (USE_TOUCH_CONTROLS) {
+    if (touchMode) {
       firing = game.fireButton.pressed || game.keys[' '];
     } else {
       firing = game.mouseDown || game.keys[' '];
@@ -891,7 +886,6 @@ class Player extends Tank {
     this.updateTimers(dt);
     this.collide(game);
 
-    // подбор бонусов
     for (let i = game.powerups.length - 1; i >= 0; i--) {
       const pu = game.powerups[i];
       const dx2 = this.pos.x - pu.x, dy2 = this.pos.y - pu.y;
@@ -1433,7 +1427,7 @@ class Game {
 
   update(dt) {
     this.time += dt;
-    if (USE_TOUCH_CONTROLS) this.joystick.update();
+    if (touchMode) this.joystick.update();
 
     if (this.state === 'menu') {
       if (Math.random() < 0.3) {
@@ -1531,8 +1525,7 @@ class Game {
       ctx.fillRect(0, 0, WIDTH, HEIGHT);
     }
 
-    // Тач-контролы рисуем только на тач-устройствах
-    if (USE_TOUCH_CONTROLS) {
+    if (touchMode) {
       this.joystick.draw(ctx);
       this.fireButton.draw(ctx);
     }
@@ -1632,8 +1625,7 @@ class Game {
     ctx.strokeStyle = 'rgb(90,150,230)'; ctx.lineWidth = 2;
     roundRect(ctx, boxX, boxY, boxW, boxH, 10); ctx.stroke();
 
-    // Разные подсказки для разных устройств
-    const lines = USE_TOUCH_CONTROLS ? [
+    const lines = touchMode ? [
       ['ДЖОЙСТИК',      'движение'],
       ['FIRE',          'огонь'],
       ['АВТО',          'наведение башни'],
@@ -1653,7 +1645,7 @@ class Game {
 
     const pulse = 0.5 + 0.5 * Math.sin(t * 4);
     const col = [120 + 135*pulse, 230 - 40*pulse, 150 + 60*pulse];
-    const startText = USE_TOUCH_CONTROLS
+    const startText = touchMode
       ? 'ТАПНИ ЭКРАН ЧТОБЫ НАЧАТЬ'
       : 'НАЖМИ ПРОБЕЛ ЧТОБЫ НАЧАТЬ';
     drawText(ctx, startText, 'bold 18px Consolas', col,
@@ -1673,9 +1665,7 @@ class Game {
     drawText(ctx, `ВОЛНА: ${this.wave}    УБИЙСТВ: ${this.kills}`, 'bold 18px Consolas',
       [220,235,255], WIDTH/2, 320, true);
     const pulse = 0.5 + 0.5 * Math.sin(t * 4);
-    const restartText = USE_TOUCH_CONTROLS
-      ? 'ТАПНИ ЭКРАН — ЗАНОВО'
-      : 'R — ЗАНОВО';
+    const restartText = touchMode ? 'ТАПНИ ЭКРАН — ЗАНОВО' : 'R — ЗАНОВО';
     drawText(ctx, restartText, 'bold 18px Consolas',
       [150 + 100*pulse, 220, 180], WIDTH/2, 390, true);
   }
@@ -1685,27 +1675,38 @@ class Game {
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
     drawText(ctx, 'ПАУЗА', 'bold 72px Impact', [200,225,255], WIDTH/2, HEIGHT/2 - 30,
       true, [30,70,150], 4);
-    const pauseText = USE_TOUCH_CONTROLS
-      ? 'ТАПНИ ЭКРАН — ПРОДОЛЖИТЬ'
-      : 'P / ESC — ПРОДОЛЖИТЬ';
+    const pauseText = touchMode ? 'ТАПНИ ЭКРАН — ПРОДОЛЖИТЬ' : 'P / ESC — ПРОДОЛЖИТЬ';
     drawText(ctx, pauseText, 'bold 18px Consolas', [180,200,225],
       WIDTH/2, HEIGHT/2 + 40, true);
   }
 }
 
 // ============================================================
-//  УПРАВЛЕНИЕ
+//  УПРАВЛЕНИЕ — КЛАВИАТУРА (через e.code, работает на любой раскладке!)
 // ============================================================
 const game = new Game();
 
-// ---------- КЛАВИАТУРА (работает всегда) ----------
+// Карта физических клавиш (e.code) → внутренние имена (независимо от раскладки)
+const KEY_MAP = {
+  'KeyW': 'w', 'KeyA': 'a', 'KeyS': 's', 'KeyD': 'd',
+  'ArrowUp': 'arrowup', 'ArrowDown': 'arrowdown',
+  'ArrowLeft': 'arrowleft', 'ArrowRight': 'arrowright',
+  'ShiftLeft': 'shift', 'ShiftRight': 'shift',
+  'Space': ' ',
+  'KeyP': 'p', 'KeyR': 'r',
+  'Escape': 'escape',
+};
+
 function onKeyDown(e) {
-  const k = e.key.toLowerCase();
+  const k = KEY_MAP[e.code];
+  if (!k) return;
+
   game.keys[k] = true;
 
   if (k === 'escape' || k === 'p') {
     if (game.state === 'playing') game.state = 'paused';
     else if (game.state === 'paused') game.state = 'playing';
+    e.preventDefault();
   } else if (k === ' ') {
     if (game.state === 'menu') { game.reset(); game.state = 'playing'; }
     e.preventDefault();
@@ -1716,22 +1717,19 @@ function onKeyDown(e) {
   }
 }
 function onKeyUp(e) {
-  game.keys[e.key.toLowerCase()] = false;
+  const k = KEY_MAP[e.code];
+  if (!k) return;
+  game.keys[k] = false;
 }
 window.addEventListener('keydown', onKeyDown);
 window.addEventListener('keyup', onKeyUp);
-document.addEventListener('keydown', onKeyDown);
-document.addEventListener('keyup', onKeyUp);
-canvas.addEventListener('keydown', onKeyDown);
-canvas.addEventListener('keyup', onKeyUp);
 
-// ---------- ФОКУС НА КАНВАС (чтобы клавиатура работала) ----------
+// ---------- ФОКУС НА КАНВАС ----------
 canvas.focus();
 window.addEventListener('load', () => canvas.focus());
 canvas.addEventListener('click', () => canvas.focus());
-canvas.addEventListener('pointerdown', () => canvas.focus());
 
-// ---------- КООРДИНАТЫ НА КАНВАСЕ ----------
+// ---------- КООРДИНАТЫ ----------
 function canvasCoords(e) {
   const rect = canvas.getBoundingClientRect();
   return {
@@ -1748,18 +1746,15 @@ canvas.addEventListener('pointerdown', e => {
 
   const { x, y } = canvasCoords(e);
 
-  // Меню / GameOver / Pause — тап/клик в любом месте
   if (game.state === 'menu') { game.reset(); game.state = 'playing'; return; }
   if (game.state === 'gameover') { game.reset(); game.state = 'playing'; return; }
   if (game.state === 'paused') { game.state = 'playing'; return; }
 
-  // На тач-устройствах — джойстик и кнопка FIRE
-  if (USE_TOUCH_CONTROLS) {
+  if (touchMode) {
     if (game.joystick.handlePointerDown(x, y, e.pointerId)) return;
     if (game.fireButton.handlePointerDown(x, y, e.pointerId)) return;
   }
 
-  // Иначе — огонь + прицел (мышь)
   if (e.pointerType === 'mouse') {
     game.mouseDown = true;
     game.mouseX = x; game.mouseY = y;
@@ -1779,14 +1774,14 @@ canvas.addEventListener('pointermove', e => {
     game.mouseX = x; game.mouseY = y;
   }
 
-  if (USE_TOUCH_CONTROLS) {
+  if (touchMode) {
     game.joystick.handlePointerMove(x, y, e.pointerId);
   }
 });
 
 function onPointerUp(e) {
   game.mouseDown = false;
-  if (USE_TOUCH_CONTROLS) {
+  if (touchMode) {
     game.joystick.handlePointerUp(e.pointerId);
     game.fireButton.handlePointerUp(e.pointerId);
   }
@@ -1795,7 +1790,6 @@ canvas.addEventListener('pointerup', onPointerUp);
 canvas.addEventListener('pointercancel', onPointerUp);
 canvas.addEventListener('pointerleave', onPointerUp);
 
-// Запрет контекстного меню и зума
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 document.addEventListener('gesturestart', e => e.preventDefault());
 document.addEventListener('dblclick', e => e.preventDefault());
@@ -1822,8 +1816,7 @@ function loop(now) {
 }
 requestAnimationFrame(loop);
 
-// Логируем режим для отладки
-console.log('[STEEL STORM] Режим:', USE_TOUCH_CONTROLS ? 'ТАЧ' : 'КЛАВИАТУРА+МЫШЬ');
+console.log('[STEEL STORM] Режим:', touchMode ? 'ТАЧ' : 'КЛАВИАТУРА+МЫШЬ', '| UA:', navigator.userAgent);
 </script>
 </body>
 </html>
